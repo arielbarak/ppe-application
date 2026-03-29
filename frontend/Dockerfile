@@ -8,7 +8,7 @@ RUN npm ci || npm install
 
 # Copy source and build
 COPY . .
-RUN npm run build
+RUN npx vite build
 
 # Production image with nginx
 FROM nginx:alpine
