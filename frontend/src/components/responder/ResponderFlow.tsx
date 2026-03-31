@@ -5,12 +5,8 @@ import { Input } from '../ui/Input';
 import { useCrypto } from '../../hooks/useCrypto';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { api } from '../../services/api';
-import { CertificationView } from './CertificationView';
 import { CertificationViewP2P } from './CertificationViewP2P';
 import { VotingView } from './VotingView';
-
-// Feature flag for P2P mode (decentralized challenge generation)
-const USE_P2P_CERTIFICATION = true;
 import type { WSMessage } from '../../types';
 
 interface ResponderFlowProps {
@@ -51,7 +47,7 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
 
   // Connect to WebSocket when we have session and node info.
   // During P2P certification, CertificationViewP2P manages its own WebSocket.
-  const skipWS = step === 'certification' && USE_P2P_CERTIFICATION;
+  const skipWS = step === 'certification';
   useWebSocket({
     sessionId: skipWS ? null : (sessionId || null),
     nodeId: nodeId || null,
@@ -184,30 +180,16 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
     );
   }
 
-  if (step === 'certification' && nodeId) {
-    // Use P2P mode for decentralized challenge generation
-    if (USE_P2P_CERTIFICATION && publicKeyBase64) {
-      return (
-        <CertificationViewP2P
-          sessionId={sessionId}
-          nodeId={nodeId}
-          publicKeyBase64={publicKeyBase64}
-          onComplete={() => setStep('voting')}
-          onBack={onReset}
-          signMessage={signMessage}
-          ppeType={ppeType}
-        />
-      );
-    }
-
-    // Legacy mode: server-generated challenges
+  if (step === 'certification' && nodeId && publicKeyBase64) {
     return (
-      <CertificationView
+      <CertificationViewP2P
         sessionId={sessionId}
         nodeId={nodeId}
+        publicKeyBase64={publicKeyBase64}
         onComplete={() => setStep('voting')}
         onBack={onReset}
         signMessage={signMessage}
+        ppeType={ppeType}
       />
     );
   }

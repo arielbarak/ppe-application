@@ -2,7 +2,7 @@
  * PPEProvider Interface - Modular Proof of Private Effort
  *
  * Defines the contract that any PPE task module must implement.
- * The core protocol layer (HMAC binding, commit-reveal, signatures)
+ * The core protocol layer (ECDSA binding, commit-reveal, signatures)
  * is agnostic to the specific task type. Only the "effort task" itself
  * (challenge generation, rendering, solution validation) is pluggable.
  *
@@ -15,7 +15,7 @@
  *   2. Register it in registry.ts via registerProvider()
  *   3. Set ppe_type when creating a poll (Protocol 1: Announcement)
  *
- * The HMAC binding and commit-reveal state machine remain in the core
+ * The ECDSA binding and commit-reveal state machine remain in the core
  * layer (symmetricCaptcha.ts) and are NOT part of this interface.
  */
 
@@ -55,13 +55,13 @@ export interface PPEProvider {
   /**
    * Generate a challenge deterministically from a seed.
    *
-   * The seed is the HMAC binding computed by the core protocol layer:
-   *   seed = HMAC(k, sorted(PubA, PubB))
+   * The seed is the ECDSA binding computed by the core protocol layer:
+   *   seed = SHA-256(ECDSA_sign(sorted(PubA, PubB)))
    *
    * The challenge MUST be deterministic given the same seed so that
-   * the verifier can independently reproduce it from the revealed MAC key.
+   * the verifier can independently reproduce it from the binding signature.
    *
-   * @param seed - Hex string from the HMAC binding
+   * @param seed - Hex string from the ECDSA binding
    * @param difficulty - Difficulty level (0.0 = trivial, 1.0 = hard), derived from η_E
    * @returns The challenge image/text and correct answer
    */
@@ -72,7 +72,7 @@ export interface PPEProvider {
    *
    * Regenerates the challenge from the seed and checks the answer.
    *
-   * @param seed - The HMAC binding seed
+   * @param seed - The ECDSA binding seed
    * @param solution - The submitted solution
    * @param difficulty - Difficulty level used when generating the challenge
    * @returns true if correct

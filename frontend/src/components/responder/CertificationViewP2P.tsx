@@ -12,7 +12,6 @@ import { api } from '../../services/api';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { usePpeHandshake } from '../../hooks/usePpeHandshake';
 import type { WSMessage, PpePayload } from '../../types';
-import { updateCertificationProgress } from '../../services/storage';
 import { extractChallengeText } from '../../services/symmetricCaptcha';
 import { getProvider, DEFAULT_PPE_TYPE, deriveDifficultyFromEtaE } from '../../services/ppe';
 
@@ -62,7 +61,6 @@ export function CertificationViewP2P({
     try {
       const status = await api.getCertificationStatus(sessionId, nodeId);
       setCertStatus(status);
-      updateCertificationProgress(sessionId, status.verified_edges || 0, status.total_edges || 0);
     } catch (error) {
       console.error('Failed to fetch certification status:', error);
     }

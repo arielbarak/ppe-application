@@ -45,7 +45,7 @@ The frontend will be available at http://localhost:3000.
 
 ### Blind Relay Design
 
-The server is a **blind signaling relay**. It routes WebSocket messages between peers but never inspects PPE challenge content. Trust is established directly between the two clients via HMAC binding and commit-reveal:
+The server is a **blind signaling relay**. It routes WebSocket messages between peers but never inspects PPE challenge content. Trust is established directly between the two clients via ECDSA binding and commit-reveal:
 
 ```
 Peer A  ──── [opaque PPE payload] ────►  Server  ────►  Peer B
@@ -117,7 +117,7 @@ backend/
     models/          # Pydantic request/response models
 frontend/
   src/services/
-    symmetricCaptcha.ts  # Core PPE protocol (HMAC binding, commit-reveal, state machine)
+    symmetricCaptcha.ts  # Core PPE protocol (ECDSA binding, commit-reveal, state machine)
     ppe/
       PPEProvider.ts         # Pluggable task interface
       MathCaptchaProvider.ts # Default implementation

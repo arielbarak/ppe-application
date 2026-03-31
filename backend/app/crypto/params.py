@@ -404,32 +404,3 @@ def validate_params(
         },
         'recommended': recommended.to_dict(),
     }
-
-
-def print_param_table(m_values: list = None, kappa_values: list = None) -> str:
-    """
-    Generate a table of parameters for different m and κ values.
-    Useful for documentation and planning.
-    """
-    if m_values is None:
-        m_values = [10, 50, 100, 500, 1000]
-    if kappa_values is None:
-        kappa_values = [40, 80, 128]
-
-    lines = []
-    header = f"{'m':>6} | {'κ':>4} | {'d':>6} | {'p':>8} | {'η_E':>6} | {'η_V':>6} | {'C*':>6}"
-    lines.append(header)
-    lines.append("-" * len(header))
-
-    for m in m_values:
-        for kappa in kappa_values:
-            params = compute_security_params(kappa, m)
-            lines.append(
-                f"{m:>6} | {kappa:>4} | {params.expected_degree:>6.2f} | "
-                f"{params.edge_probability:>8.4f} | {params.effort_threshold:>6.3f} | "
-                f"{params.validity_threshold:>6.4f} | {params.adversary_advantage:>6.3f}"
-            )
-        if m != m_values[-1]:
-            lines.append("")
-
-    return "\n".join(lines)
