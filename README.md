@@ -66,38 +66,6 @@ Phase 5 - Results: Pollster publishes all data (votes, graph, signatures) as a p
 
 Phase 6 - Verification: Anyone reconstructs the ideal graph and independently verifies the tally.
 
-### Distributed Verification (O(log m))
-
-For large polls, the standard O(m) verification can be a bottleneck. The system supports parallel/distributed verification using an aggregation tree:
-
-```
-                    [Root]
-                   /      \
-            [Internal]    [Internal]
-            /    \          /    \
-      [Leaf_0] [Leaf_1] [Leaf_2] [Leaf_3]
-       (n0-n9)  (n10-n19) (n20-n29) (n30-n39)
-```
-
-Each tree node contains:
-- **commitment**: SHA-256 hash of subtree data
-- **vote_tally**: Aggregated votes from all leaves below
-- **edge_summary**: Verified/omitted/failed edge counts
-- **excluded_count**: Nodes excluded by eta_E
-
-Verifiers can now:
-1. Request their assigned partition via `GET /api/poll/{id}/results/partition/{partition_id}`
-2. Verify local edges against the ideal graph (O(partition_size))
-3. Verify Merkle proof to root (O(log m))
-4. Confirm root commitment matches published aggregate
-
-API Endpoints:
-- `GET /results/distributed` - Full tree structure
-- `GET /results/partition/{id}` - Single partition with Merkle proof
-- `GET /results/proof/{node_id}` - Merkle proof for specific node
-- `POST /results/verify-subset` - Minimal data for verifying specific nodes
-- `GET /results/tree-summary` - Tree structure overview
-
 ### Certification Graph
 
 Edges aren't assigned by the pollster. They're derived deterministically:

@@ -11,17 +11,6 @@ from .params import (
     recommend_params_for_poll,
     validate_params,
 )
-from .aggregation_tree import (
-    build_aggregation_tree,
-    get_merkle_proof,
-    verify_merkle_proof,
-    get_verification_subset,
-    verify_partition,
-    TreeNode,
-    MerkleProof,
-    EdgeSummary,
-)
-
 __all__ = [
     "compute_node_id",
     "determine_neighbors",
@@ -36,13 +25,4 @@ __all__ = [
     "compute_validity_threshold_from_advantage",
     "recommend_params_for_poll",
     "validate_params",
-    # Aggregation tree for distributed verification
-    "build_aggregation_tree",
-    "get_merkle_proof",
-    "verify_merkle_proof",
-    "get_verification_subset",
-    "verify_partition",
-    "TreeNode",
-    "MerkleProof",
-    "EdgeSummary",
 ]

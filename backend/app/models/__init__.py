@@ -24,15 +24,6 @@ __all__ = [
     "PublishResultsResponse",
     "ResultsResponse",
     "EdgeData",
-    # Distributed verification models
-    "EdgeSummaryModel",
-    "TreeNodeModel",
-    "MerkleProofModel",
-    "DistributedResultsResponse",
-    "PartitionVerificationRequest",
-    "PartitionVerificationResponse",
-    "VerificationSubsetRequest",
-    "VerificationSubsetResponse",
     # Verification models
     "VerificationRequest",
     "VerificationResponse",
