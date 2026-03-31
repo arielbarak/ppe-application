@@ -36,7 +36,6 @@ export function VerifierFlow({ onReset, initialSessionId }: VerifierFlowProps) {
 
   const verifyPoll = useCallback(async () => {
     if (!sessionId.trim()) {
-      alert('Please enter a Session ID');
       return;
     }
 

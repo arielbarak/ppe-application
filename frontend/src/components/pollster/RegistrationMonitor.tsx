@@ -55,7 +55,7 @@ export function RegistrationMonitor({ sessionId, onAdvance }: RegistrationMonito
       await api.updatePollStatus(sessionId, 'certification');
       onAdvance();
     } catch (error) {
-      alert(`Failed to advance: ${error}`);
+      console.error('Failed to advance:', error);
     }
   };
 
@@ -65,8 +65,7 @@ export function RegistrationMonitor({ sessionId, onAdvance }: RegistrationMonito
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (error) {
-      console.error('Failed to copy:', error);
-      alert('Failed to copy to clipboard');
+      console.error('Failed to copy to clipboard:', error);
     }
   };
 

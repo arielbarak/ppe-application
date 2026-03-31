@@ -1,8 +1,8 @@
 /**
  * React hook for client-side cryptography
  *
- * Manages key generation and signing operations
- * SECURITY NOTE: Keys can be exported for session persistence
+ * Manages key generation and signing operations.
+ * Keys are ephemeral and exist only in memory for the current session.
  */
 
 import { useState, useCallback } from 'react';
@@ -11,10 +11,6 @@ import {
   exportPublicKey,
   signMessage as signMessageCrypto,
   hashString,
-  exportPrivateKey,
-  importPrivateKey,
-  exportPublicKeyAsJWK,
-  importPublicKeyFromJWK,
 } from '../services/crypto';
 
 export function useCrypto() {
@@ -89,59 +85,6 @@ export function useCrypto() {
     console.log('Keys cleared from memory');
   }, []);
 
-  /**
-   * Export keys for localStorage storage
-   * Returns JWK strings for both private and public keys
-   */
-  const exportKeys = useCallback(async (): Promise<{
-    privateKeyJWK: string;
-    publicKeyJWK: string;
-  } | null> => {
-    if (!keyPair) {
-      console.warn('No keys to export');
-      return null;
-    }
-
-    try {
-      const privateKeyJWK = await exportPrivateKey(keyPair.privateKey);
-      const publicKeyJWK = await exportPublicKeyAsJWK(keyPair.publicKey);
-
-      console.log('Keys exported for storage');
-      return { privateKeyJWK, publicKeyJWK };
-    } catch (error) {
-      console.error('Failed to export keys:', error);
-      throw error;
-    }
-  }, [keyPair]);
-
-  /**
-   * Restore keys from JWK strings (for session recovery)
-   */
-  const restoreKeys = useCallback(async (
-    privateKeyJWK: string,
-    publicKeyJWK: string,
-    publicKeyBase64Input: string
-  ): Promise<void> => {
-    try {
-      const privateKey = await importPrivateKey(privateKeyJWK);
-      const publicKey = await importPublicKeyFromJWK(publicKeyJWK);
-
-      const restoredKeyPair: CryptoKeyPair = {
-        privateKey,
-        publicKey,
-      };
-
-      setKeyPair(restoredKeyPair);
-      setPublicKeyBase64(publicKeyBase64Input);
-
-      console.log('Keys restored from storage');
-      console.log('Public key (base64):', publicKeyBase64Input.substring(0, 50) + '...');
-    } catch (error) {
-      console.error('Failed to restore keys:', error);
-      throw error;
-    }
-  }, []);
-
   return {
     keyPair,
     publicKeyBase64,
@@ -151,7 +94,5 @@ export function useCrypto() {
     createCommitment,
     clearKeys,
     hasKeys: keyPair !== null,
-    exportKeys,
-    restoreKeys,
   };
 }

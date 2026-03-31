@@ -8,19 +8,10 @@ import { api } from '../../services/api';
 import { CertificationView } from './CertificationView';
 import { CertificationViewP2P } from './CertificationViewP2P';
 import { VotingView } from './VotingView';
-import { SessionList } from './SessionList';
 
 // Feature flag for P2P mode (decentralized challenge generation)
 const USE_P2P_CERTIFICATION = true;
 import type { WSMessage } from '../../types';
-import {
-  saveSession,
-  updateSessionProgress,
-  updateCertificationProgress,
-  touchSession,
-  getSession,
-  type SavedSession,
-} from '../../services/storage';
 
 interface ResponderFlowProps {
   onReset: () => void;
@@ -35,8 +26,6 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
   const [nodeId, setNodeId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [pollStatus, setPollStatus] = useState<string>('registration');
-  const [showSessionList, setShowSessionList] = useState(true);
-  const [isRestoringSession, setIsRestoringSession] = useState(false);
   const [hasVoted, setHasVoted] = useState(false);
   const [isCertified, setIsCertified] = useState(false);
   const [certificationStatus, setCertificationStatus] = useState<{
@@ -46,7 +35,7 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
   } | null>(null);
   const [ppeType, setPpeType] = useState<string | undefined>(undefined);
 
-  const { generateKeyPair, publicKeyBase64, hasKeys, exportKeys, restoreKeys, signMessage } = useCrypto();
+  const { generateKeyPair, publicKeyBase64, hasKeys, signMessage } = useCrypto();
 
   // WebSocket message handler
   const handleWSMessage = useCallback((message: WSMessage) => {
@@ -56,80 +45,22 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
       case 'status.changed':
         const newStatus = message.data.new_status;
         console.log('Poll status changed to:', newStatus);
-
-        if (newStatus === 'cancelled') {
-          alert('⚠️ Poll Cancelled\n\nThe pollster has cancelled this poll because not enough participants completed the certification phase.\n\nThank you for participating!');
-        }
         break;
     }
   }, []);
 
   // Connect to WebSocket when we have session and node info.
   // During P2P certification, CertificationViewP2P manages its own WebSocket.
-  // We must NOT create a second connection to the same (session, node) or the
-  // server will overwrite one with the other, causing an infinite reconnect loop.
   const skipWS = step === 'certification' && USE_P2P_CERTIFICATION;
-  const { isConnected } = useWebSocket({
+  useWebSocket({
     sessionId: skipWS ? null : (sessionId || null),
     nodeId: nodeId || null,
     role: 'responder',
     onMessage: handleWSMessage,
   });
 
-  const handleRestoreSession = async (savedSession: SavedSession) => {
-    setIsRestoringSession(true);
-    try {
-      // Restore keys
-      await restoreKeys(
-        savedSession.privateKeyJWK,
-        savedSession.publicKeyJWK,
-        savedSession.publicKeyBase64
-      );
-
-      // Restore state
-      setSessionId(savedSession.sessionId);
-      setNodeId(savedSession.nodeId);
-      setStep(savedSession.currentStep);
-      setPollStatus(savedSession.pollStatus);
-      setHasVoted(savedSession.hasVoted || false);
-
-      // Update last accessed time
-      touchSession(savedSession.sessionId);
-
-      // Hide session list
-      setShowSessionList(false);
-
-      console.log('Session restored:', savedSession.sessionId);
-    } catch (error) {
-      console.error('Failed to restore session:', error);
-      alert('Failed to restore session. Please join a new poll.');
-    } finally {
-      setIsRestoringSession(false);
-    }
-  };
-
-  const handleStartNewSession = () => {
-    setShowSessionList(false);
-    setStep('join');
-  };
-
   const joinPoll = async () => {
     if (!sessionId.trim()) {
-      alert('Please enter a Session ID');
-      return;
-    }
-
-    // Check if already registered for this poll
-    const existingSession = getSession(sessionId.trim());
-    if (existingSession) {
-      const restore = window.confirm(
-        'You are already registered for this poll.\n\n' +
-        'Would you like to restore your existing session?\n\n' +
-        'Click OK to restore, or Cancel to go back.'
-      );
-      if (restore) {
-        await handleRestoreSession(existingSession);
-      }
       return;
     }
 
@@ -146,7 +77,6 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
       setStep('captcha');
     } catch (error) {
       console.error('Failed to join poll:', error);
-      alert(`Failed to join poll: ${error}`);
     } finally {
       setIsLoading(false);
     }
@@ -154,7 +84,6 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
 
   const solveCaptcha = async () => {
     if (!captchaSolution.trim() || !publicKeyBase64 || !captchaChallenge) {
-      alert('Please solve the CAPTCHA');
       return;
     }
 
@@ -169,39 +98,12 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
       setNodeId(result.node_id);
       setStep('registered');
       console.log('Registered as node:', result.node_id);
-
-      // Save session to localStorage for re-access
-      const keys = await exportKeys();
-      if (keys) {
-        saveSession({
-          sessionId,
-          nodeId: result.node_id,
-          publicKeyBase64,
-          publicKeyJWK: keys.publicKeyJWK,
-          privateKeyJWK: keys.privateKeyJWK,
-          currentStep: 'registered',
-          pollStatus: 'registration',
-          savedAt: new Date().toISOString(),
-          lastAccessedAt: new Date().toISOString(),
-        });
-      }
     } catch (error) {
       console.error('Registration failed:', error);
-      alert(`Registration failed: ${error}`);
     } finally {
       setIsLoading(false);
     }
   };
-
-  // Load hasVoted status from localStorage
-  useEffect(() => {
-    if (sessionId) {
-      const session = getSession(sessionId);
-      if (session) {
-        setHasVoted(session.hasVoted || false);
-      }
-    }
-  }, [sessionId]);
 
   // Poll for status changes when registered
   useEffect(() => {
@@ -224,33 +126,20 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
                 total_edges: certStatus.total_edges,
                 message: certStatus.message,
               });
-              // Save certification progress to localStorage for session list display
-              updateCertificationProgress(sessionId, certStatus.verified_edges, certStatus.total_edges);
               console.log('Certification status:', certStatus);
             } catch (error) {
               console.error('Failed to check certification status:', error);
             }
           }
 
-          // Update session progress in localStorage
-          if (step === 'registered') {
-            updateSessionProgress(sessionId, 'registered', pollInfo.status);
-          } else if (step === 'certification') {
-            updateSessionProgress(sessionId, 'certification', pollInfo.status);
-          } else if (step === 'voting') {
-            updateSessionProgress(sessionId, 'voting', pollInfo.status);
-          }
-
           // Auto-advance to certification when poll status changes
           if (pollInfo.status === 'certification' && step === 'registered') {
             setStep('certification');
-            updateSessionProgress(sessionId, 'certification', pollInfo.status);
           }
 
           // Auto-advance to voting
           if (pollInfo.status === 'voting' && step === 'certification') {
             setStep('voting');
-            updateSessionProgress(sessionId, 'voting', pollInfo.status);
           }
         } catch (error) {
           console.error('Failed to check poll status:', error);
@@ -265,17 +154,6 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
       return () => clearInterval(interval);
     }
   }, [step, sessionId, nodeId]);
-
-  // Show session list if enabled
-  if (showSessionList) {
-    return (
-      <SessionList
-        onSelectSession={handleRestoreSession}
-        onStartNew={handleStartNewSession}
-        onBack={onReset}
-      />
-    );
-  }
 
   if (step === 'join') {
     return (
@@ -292,7 +170,7 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
             <Button onClick={joinPoll} disabled={isLoading} className="flex-1">
               {isLoading ? 'Joining...' : 'Join Poll (Protocol 2)'}
             </Button>
-            <Button variant="secondary" onClick={() => setShowSessionList(true)}>
+            <Button variant="secondary" onClick={onReset}>
               Back
             </Button>
           </div>
@@ -374,7 +252,7 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
           </div>
 
           <div className="mt-4 p-3 bg-green-50 rounded text-sm text-green-800">
-            <p>🔒 Your private key was generated locally and will never leave your browser!</p>
+            <p>Your private key was generated locally and will never leave your browser!</p>
           </div>
         </Card>
       </div>
@@ -391,7 +269,7 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
             {nodeId}
           </p>
           <p className="text-sm text-green-700 mt-2">
-            ✅ You are now registered in the poll!
+            You are now registered in the poll!
           </p>
         </div>
 
@@ -417,7 +295,7 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
               <br />
               {pollStatus === 'cancelled' && (
                 <>
-                  ❌ Poll Cancelled by Pollster
+                  Poll Cancelled by Pollster
                   <br />
                   This poll has been cancelled because not enough participants completed the certification phase.
                   <br />
@@ -426,42 +304,42 @@ export function ResponderFlow({ onReset, onSwitchToVerifier }: ResponderFlowProp
               )}
               {pollStatus === 'registration' && (
                 <>
-                  • Waiting for certification phase to start...
+                  Waiting for certification phase to start...
                   <br />
-                  • The pollster will advance when ready
+                  The pollster will advance when ready
                 </>
               )}
               {pollStatus === 'certification' && (
                 <>
-                  🎉 Certification phase has started!
+                  Certification phase has started!
                   <br />
                   Click "Continue to Certification" to begin PPE
                 </>
               )}
               {pollStatus === 'voting' && !hasVoted && isCertified && (
                 <>
-                  🗳️ Voting phase has started!
+                  Voting phase has started!
                   <br />
                   Click "Continue to Voting" to cast your vote
                 </>
               )}
               {pollStatus === 'voting' && !hasVoted && !isCertified && certificationStatus && (
                 <>
-                  ❌ Voting is open, but you cannot vote
+                  Voting is open, but you cannot vote
                   <br />
                   You did not complete certification ({certificationStatus.verified_edges}/{certificationStatus.total_edges} edges verified)
                 </>
               )}
               {pollStatus === 'voting' && hasVoted && (
                 <>
-                  ✅ Vote submitted successfully!
+                  Vote submitted successfully!
                   <br />
                   Waiting for results to be published...
                 </>
               )}
               {pollStatus === 'results' && (
                 <>
-                  📊 Results have been published!
+                  Results have been published!
                   <br />
                   View the final results below
                 </>

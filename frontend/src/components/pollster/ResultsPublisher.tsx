@@ -26,7 +26,7 @@ export function ResultsPublisher({ sessionId, onReset }: ResultsPublisherProps) 
       setVerification(result);
       setPublishedResults(results);
     } catch (error) {
-      alert(`Verification failed: ${error}`);
+      console.error('Verification failed:', error);
     } finally {
       setIsVerifying(false);
     }

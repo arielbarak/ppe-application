@@ -4,7 +4,6 @@ import { Button } from '../ui/Button';
 import { api } from '../../services/api';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import type { WSMessage } from '../../types';
-import { updateCertificationProgress } from '../../services/storage';
 
 interface CertificationViewProps {
   sessionId: string;
@@ -52,11 +51,6 @@ export function CertificationView({ sessionId, nodeId, onComplete, onBack, signM
     try {
       const status = await api.getCertificationStatus(sessionId, nodeId);
       setCertStatus(status);
-
-      // Save certification progress to localStorage for session list display
-      const verifiedEdges = status.verified_edges || 0;
-      const totalEdges = status.total_edges || status.total_neighbors || 0;
-      updateCertificationProgress(sessionId, verifiedEdges, totalEdges);
 
       // Update neighbor statuses based on backend certification status
       if (status.neighbor_statuses) {
@@ -222,7 +216,7 @@ export function CertificationView({ sessionId, nodeId, onComplete, onBack, signM
   useEffect(() => {
     if (pollStatus === 'cancelled' && !cancelledAlertShown.current) {
       cancelledAlertShown.current = true;
-      alert('⚠️ Poll Cancelled\n\nThe pollster has cancelled this poll because not enough participants completed the certification phase.\n\nThank you for participating!');
+      // Poll cancelled - UI will reflect the new status
     }
   }, [pollStatus]);
 
@@ -297,7 +291,6 @@ export function CertificationView({ sessionId, nodeId, onComplete, onBack, signM
     console.log('Session ID:', sessionId);
 
     if (!isConnected) {
-      alert('WebSocket not connected. Please wait...');
       return;
     }
 
@@ -331,14 +324,12 @@ export function CertificationView({ sessionId, nodeId, onComplete, onBack, signM
       );
     } else {
       console.error('Failed to send PPE initiation');
-      alert('Failed to send PPE initiation');
     }
     setIsLoading(false);
   };
 
   const commitSolution = async () => {
     if (!solution.trim() || !activePPE) {
-      alert('Please enter a solution');
       return;
     }
 
@@ -358,7 +349,6 @@ export function CertificationView({ sessionId, nodeId, onComplete, onBack, signM
 
   const revealSolution = async () => {
     if (!activePPE || !activePPE.my_solution) {
-      alert('No solution to reveal');
       return;
     }
 
@@ -375,7 +365,6 @@ export function CertificationView({ sessionId, nodeId, onComplete, onBack, signM
       setActivePPE({ ...activePPE, status: 'completed' });
     } catch (error) {
       console.error('Failed to reveal solution:', error);
-      alert('Failed to sign solution');
     }
   };
 

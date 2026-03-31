@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { Card } from '../ui/Card';
 import { Button } from '../ui/Button';
 import { api } from '../../services/api';
-import { markSessionAsVoted } from '../../services/storage';
 import type { PollSession } from '../../types';
 
 interface VotingViewProps {
@@ -26,7 +25,6 @@ export function VotingView({ sessionId, nodeId, signMessage, onComplete }: Votin
         setIsLoading(false);
       } catch (error) {
         console.error('Failed to fetch poll data:', error);
-        alert('Failed to load voting page');
         setIsLoading(false);
       }
     };
@@ -36,7 +34,6 @@ export function VotingView({ sessionId, nodeId, signMessage, onComplete }: Votin
 
   const submitVote = async () => {
     if (!selectedOption || !poll) {
-      alert('Please select an option');
       return;
     }
 
@@ -61,14 +58,9 @@ export function VotingView({ sessionId, nodeId, signMessage, onComplete }: Votin
 
       console.log('Vote submitted successfully');
 
-      // Mark session as voted in localStorage
-      markSessionAsVoted(sessionId);
-
-      alert('Vote submitted successfully!');
       onComplete();
     } catch (error) {
       console.error('Failed to submit vote:', error);
-      alert(`Failed to submit vote: ${error}`);
     } finally {
       setIsSubmitting(false);
     }

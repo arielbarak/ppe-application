@@ -37,7 +37,7 @@ export function VotingMonitor({ sessionId, onPublish }: VotingMonitorProps) {
       await api.publishResults(sessionId);
       onPublish();
     } catch (error) {
-      alert(`Failed to publish results: ${error}`);
+      console.error('Failed to publish results:', error);
     }
   };
 

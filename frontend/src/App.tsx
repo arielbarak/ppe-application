@@ -3,15 +3,11 @@ import { ModeSelector } from './components/shared/ModeSelector';
 import { PollsterFlowEnhanced } from './components/pollster/PollsterFlowEnhanced';
 import { ResponderFlow } from './components/responder/ResponderFlow';
 import { VerifierFlow } from './components/verifier/VerifierFlow';
-import { useNotifications } from './hooks/useNotifications';
 import type { Mode } from './types';
 
 function App() {
   const [mode, setMode] = useState<Mode | null>(null);
   const [verifierSessionId, setVerifierSessionId] = useState<string>('');
-
-  // Enable browser notifications for action required alerts
-  useNotifications();
 
   const handleReset = () => {
     setMode(null);

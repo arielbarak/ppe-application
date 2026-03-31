@@ -136,7 +136,7 @@ export function CertificationMonitor({ sessionId, nodeId, onAdvance }: Certifica
       await api.updatePollStatus(sessionId, 'voting');
       onAdvance();
     } catch (error) {
-      alert(`Failed to advance: ${error}`);
+      console.error('Failed to advance:', error);
     }
   };
 
@@ -147,10 +147,9 @@ export function CertificationMonitor({ sessionId, nodeId, onAdvance }: Certifica
 
     try {
       await api.updatePollStatus(sessionId, 'cancelled');
-      alert('Poll cancelled. All participants have been notified.');
       onAdvance(); // Refresh the view
     } catch (error) {
-      alert(`Failed to cancel poll: ${error}`);
+      console.error('Failed to cancel poll:', error);
     }
   };
 

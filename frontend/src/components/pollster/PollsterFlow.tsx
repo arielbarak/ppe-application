@@ -21,7 +21,6 @@ export function PollsterFlow({ onReset }: PollsterFlowProps) {
 
   const createPoll = async () => {
     if (!questionText.trim() || options.some((opt) => !opt.trim())) {
-      alert('Please fill in all question and option fields');
       return;
     }
 
@@ -30,7 +29,6 @@ export function PollsterFlow({ onReset }: PollsterFlowProps) {
     const lowerCaseOptions = filteredOptions.map((opt) => opt.toLowerCase());
     const uniqueOptions = new Set(lowerCaseOptions);
     if (uniqueOptions.size !== filteredOptions.length) {
-      alert('Each answer option must be unique. Please remove duplicate options.');
       return;
     }
 
@@ -54,7 +52,6 @@ export function PollsterFlow({ onReset }: PollsterFlowProps) {
       console.log('Poll created:', newSession);
     } catch (error) {
       console.error('Failed to create poll:', error);
-      alert(`Failed to create poll: ${error}`);
     } finally {
       setIsCreating(false);
     }
@@ -67,8 +64,7 @@ export function PollsterFlow({ onReset }: PollsterFlowProps) {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       } catch (error) {
-        console.error('Failed to copy:', error);
-        alert('Failed to copy to clipboard');
+        console.error('Failed to copy to clipboard:', error);
       }
     }
   };

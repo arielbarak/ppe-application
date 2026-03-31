@@ -7,13 +7,6 @@ import { RegistrationMonitor } from './RegistrationMonitor';
 import { CertificationMonitor } from './CertificationMonitor';
 import { VotingMonitor } from './VotingMonitor';
 import { ResultsPublisher } from './ResultsPublisher';
-import { PollsterSessionList } from './PollsterSessionList';
-import {
-  savePollsterSession,
-  updatePollsterSessionProgress,
-  touchPollsterSession,
-  type SavedPollsterSession,
-} from '../../services/storage';
 import type { PollSession, PollStatus } from '../../types';
 import { listProviders, DEFAULT_PPE_TYPE } from '../../services/ppe';
 
@@ -27,7 +20,6 @@ export function PollsterFlowEnhanced({ onReset }: PollsterFlowEnhancedProps) {
   const [session, setSession] = useState<PollSession | null>(null);
   const [currentPhase, setCurrentPhase] = useState<PollStatus>('registration');
   const [isCreating, setIsCreating] = useState(false);
-  const [showSessionList, setShowSessionList] = useState(true);
 
   // Poll creation form
   const [questionText, setQuestionText] = useState('');
@@ -45,12 +37,6 @@ export function PollsterFlowEnhanced({ onReset }: PollsterFlowEnhancedProps) {
           const updated = await api.getPoll(session.session_id);
           if (updated.status && updated.status !== currentPhase) {
             setCurrentPhase(updated.status);
-            // Update stored session progress
-            updatePollsterSessionProgress(
-              session.session_id,
-              updated.status,
-              updated.registered_nodes_count
-            );
           }
         } catch (error) {
           console.error('Failed to fetch poll status:', error);
@@ -61,53 +47,8 @@ export function PollsterFlowEnhanced({ onReset }: PollsterFlowEnhancedProps) {
     }
   }, [session, currentPhase]);
 
-  // Restore a saved session
-  const handleRestoreSession = async (savedSession: SavedPollsterSession) => {
-    try {
-      // Fetch the actual poll state from server
-      const pollInfo = await api.getPoll(savedSession.sessionId);
-
-      // Reconstruct the session object
-      const restoredSession: PollSession = {
-        session_id: savedSession.sessionId,
-        public_key: pollInfo.public_key || '',
-        status: pollInfo.status,
-        questions: pollInfo.questions || [
-          {
-            id: 'q1',
-            text: savedSession.question,
-            options: savedSession.options,
-          },
-        ],
-        parameters: {
-          edge_probability: savedSession.edgeProbability,
-          effort_threshold: savedSession.effortThreshold,
-          validity_threshold: savedSession.validityThreshold ?? 0.025,
-        },
-        registered_nodes_count: pollInfo.registered_nodes_count || 0,
-      };
-
-      setSession(restoredSession);
-      setCurrentPhase(pollInfo.status || 'registration');
-      setShowSessionList(false);
-
-      // Update last accessed time
-      touchPollsterSession(savedSession.sessionId);
-
-      console.log('Pollster session restored:', savedSession.sessionId);
-    } catch (error) {
-      console.error('Failed to restore session:', error);
-      alert(`Failed to restore session: ${error}\n\nThe poll may no longer exist.`);
-    }
-  };
-
-  const handleStartNew = () => {
-    setShowSessionList(false);
-  };
-
   const createPoll = async () => {
     if (!questionText.trim() || options.some((opt) => !opt.trim())) {
-      alert('Please fill in all question and option fields');
       return;
     }
 
@@ -116,7 +57,6 @@ export function PollsterFlowEnhanced({ onReset }: PollsterFlowEnhancedProps) {
     const lowerCaseOptions = filteredOptions.map((opt) => opt.toLowerCase());
     const uniqueOptions = new Set(lowerCaseOptions);
     if (uniqueOptions.size !== filteredOptions.length) {
-      alert('Each answer option must be unique. Please remove duplicate options.');
       return;
     }
 
@@ -139,24 +79,9 @@ export function PollsterFlowEnhanced({ onReset }: PollsterFlowEnhancedProps) {
       setSession(newSession);
       setCurrentPhase('registration');
 
-      // Save to localStorage
-      savePollsterSession({
-        sessionId: newSession.session_id,
-        question: questionText,
-        options: filteredOptions,
-        edgeProbability,
-        effortThreshold,
-        validityThreshold,
-        currentPhase: 'registration',
-        registeredNodes: 0,
-        savedAt: new Date().toISOString(),
-        lastAccessedAt: new Date().toISOString(),
-      });
-
       console.log('Poll created:', newSession);
     } catch (error) {
       console.error('Failed to create poll:', error);
-      alert(`Failed to create poll: ${error}`);
     } finally {
       setIsCreating(false);
     }
@@ -167,23 +92,11 @@ export function PollsterFlowEnhanced({ onReset }: PollsterFlowEnhancedProps) {
     setCurrentPhase('registration');
     setQuestionText('');
     setOptions(['', '', '']);
-    setShowSessionList(true);
   };
 
   const handleBackToHome = () => {
     onReset();
   };
-
-  // Show session list first
-  if (showSessionList && !session) {
-    return (
-      <PollsterSessionList
-        onSelectSession={handleRestoreSession}
-        onStartNew={handleStartNew}
-        onBack={handleBackToHome}
-      />
-    );
-  }
 
   // Poll creation form
   if (!session) {
@@ -307,9 +220,9 @@ export function PollsterFlowEnhanced({ onReset }: PollsterFlowEnhancedProps) {
 
             <div className="flex gap-4">
               <Button onClick={createPoll} disabled={isCreating} className="flex-1">
-                {isCreating ? 'Creating...' : '📊 Create Poll (Protocol 1)'}
+                {isCreating ? 'Creating...' : 'Create Poll (Protocol 1)'}
               </Button>
-              <Button variant="secondary" onClick={() => setShowSessionList(true)}>
+              <Button variant="secondary" onClick={handleBackToHome}>
                 Back
               </Button>
             </div>
@@ -426,7 +339,7 @@ export function PollsterFlowEnhanced({ onReset }: PollsterFlowEnhancedProps) {
         {currentPhase === 'cancelled' && (
           <Card title="Poll Cancelled">
             <div className="text-center py-8">
-              <div className="text-6xl mb-4">❌</div>
+              <div className="text-6xl mb-4">X</div>
               <h2 className="text-2xl font-bold text-red-600 mb-4">Poll Cancelled</h2>
               <p className="text-gray-700 mb-6">
                 This poll has been cancelled because not enough participants completed the
