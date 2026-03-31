@@ -1,7 +1,7 @@
 /**
  * Math CAPTCHA PPE Provider
  *
- * Generates deterministic arithmetic problems seeded from the HMAC binding.
+ * Generates deterministic arithmetic problems seeded from the binding signature.
  * Difficulty is derived from η_E: difficulty = 1 - η_E
  * - Low η_E (strict) → high difficulty (larger numbers, multiplication)
  * - High η_E (lenient) → low difficulty (smaller numbers, add/subtract only)
@@ -9,8 +9,17 @@
 
 import type { PPEProvider, PPEChallenge } from './PPEProvider';
 
+function seedToNumber(seed: string): number {
+  // Derive a stable integer from any string (hex, base64, etc.)
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
 function generateMathChallenge(seed: string, difficulty: number = 0.5): { question: string; answer: string } {
-  const seedNum = parseInt(seed.substring(0, 8), 16);
+  const seedNum = seedToNumber(seed);
 
   // Scale operators based on difficulty (exclude multiplication for easy)
   const operators = difficulty < 0.3 ? ['+', '-'] : ['+', '-', '*'];

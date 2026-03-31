@@ -2,29 +2,27 @@
  * usePpeHandshake - Custom hook for P2P PPE state machine
  *
  * Encapsulates all handshake phase logic:
- * - IDLE -> SOLVING -> COMMITTING -> REVEALING -> VERIFYING -> COMPLETE
+ * - IDLE -> SOLVING -> COMMITTING -> VERIFYING -> COMPLETE
  * - Message buffering for out-of-order arrivals
- * - Cryptographic verification flow
+ * - Cryptographic verification flow (ECDSA binding, commit-reveal)
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { PpePayload } from '../types';
 import {
   generateBoundChallenge,
-  verifyChallengeBound,
   verifySolution,
   createCommitment,
   verifyCommitment,
   type GeneratedChallenge,
 } from '../services/symmetricCaptcha';
+import { verifyBindingSignature } from '../services/crypto';
 
 export type HandshakePhase =
   | 'idle'
   | 'awaiting_peer_challenge'
   | 'solving'
   | 'awaiting_peer_commitment'
-  | 'awaiting_peer_key'
-  | 'verifying_binding'
   | 'awaiting_peer_solution'
   | 'signing'
   | 'completed'
@@ -37,8 +35,7 @@ interface PpeSession {
   phase: HandshakePhase;
   myChallenge?: GeneratedChallenge;
   theirChallengeImage?: string;
-  theirHmacBinding?: string;
-  theirMacKey?: string;
+  theirBindingSignature?: string;
   mySolution?: string;
   myCommitment?: { commitmentHash: string; nonce: string };
   theirCommitmentHash?: string;
@@ -48,6 +45,7 @@ interface PpeSession {
   theirSignature?: string;
   solutionInput?: string;
   errorMessage?: string;
+  bindingVerified?: boolean;
 }
 
 interface UsePpeHandshakeOptions {
@@ -97,7 +95,6 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
   const [bufferedMessages, setBufferedMessages] = useState<Record<string, PpePayload[]>>({});
 
   // Refs to track what we've sent (prevent duplicates)
-  const sentKeyReveal = useRef(false);
   const sentSolution = useRef(false);
   const sentSignature = useRef(false);
   const sentComplete = useRef(false);
@@ -105,7 +102,6 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
   // Reset tracking when session changes
   useEffect(() => {
     if (!session) {
-      sentKeyReveal.current = false;
       sentSolution.current = false;
       sentSignature.current = false;
       sentComplete.current = false;
@@ -119,7 +115,7 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
     switch (payload.type) {
       case 'challenge':
         updated.theirChallengeImage = payload.challengeImage as string;
-        updated.theirHmacBinding = payload.hmacBinding as string;
+        updated.theirBindingSignature = payload.bindingSignature as string;
         if (updated.myChallenge) {
           updated.phase = 'solving';
         }
@@ -128,14 +124,7 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
       case 'commitment':
         updated.theirCommitmentHash = payload.commitmentHash as string;
         if (updated.myCommitment && updated.phase === 'awaiting_peer_commitment') {
-          updated.phase = 'awaiting_peer_key';
-        }
-        break;
-
-      case 'key_reveal':
-        updated.theirMacKey = payload.macKey as string;
-        if (updated.myCommitment && updated.theirCommitmentHash) {
-          updated.phase = 'verifying_binding';
+          updated.phase = 'awaiting_peer_solution';
         }
         break;
 
@@ -198,6 +187,7 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
     const challenge = await generateBoundChallenge(
       publicKeyBase64,
       targetPublicKey,
+      signMessage,
       ppeType,
       difficulty
     );
@@ -229,9 +219,9 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
       type: 'challenge',
       challengeImage: challenge.challengeImage,
       challengeType: ppeType,
-      hmacBinding: challenge.hmacBinding,
+      bindingSignature: challenge.bindingSignature,
     });
-  }, [publicKeyBase64, ppeType, difficulty, bufferedMessages, applyMessage, sendToPeer]);
+  }, [publicKeyBase64, ppeType, difficulty, bufferedMessages, applyMessage, sendToPeer, signMessage]);
 
   // Update session ID (from server confirmation)
   const updateSessionId = useCallback((sessionId: string) => {
@@ -260,7 +250,7 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
       ...prev,
       mySolution: solution,
       myCommitment: commitment,
-      phase: prev.theirCommitmentHash ? 'awaiting_peer_key' : 'awaiting_peer_commitment',
+      phase: prev.theirCommitmentHash ? 'awaiting_peer_solution' : 'awaiting_peer_commitment',
     } : null);
   }, [session, sendToPeer]);
 
@@ -269,62 +259,46 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
     setSession(null);
   }, []);
 
+  // Verify binding signature when we receive a challenge
+  useEffect(() => {
+    if (!session || !session.theirBindingSignature || session.bindingVerified) return;
+
+    const verify = async () => {
+      const isValid = await verifyBindingSignature(
+        session.peerPublicKey,
+        publicKeyBase64,
+        session.theirBindingSignature!
+      );
+
+      if (!isValid) {
+        setSession(prev => prev ? {
+          ...prev,
+          phase: 'failed',
+          errorMessage: 'Challenge binding verification failed - potential proxy attack!',
+          bindingVerified: true,
+        } : null);
+
+        sendToPeer(session.peerNodeId, {
+          type: 'error',
+          code: 'BINDING_FAILED',
+          message: 'Challenge binding verification failed',
+        });
+        return;
+      }
+
+      setSession(prev => prev ? { ...prev, bindingVerified: true } : null);
+    };
+
+    verify();
+  }, [session?.theirBindingSignature, session?.bindingVerified, session?.peerPublicKey, publicKeyBase64, sendToPeer]);
+
   // State machine processing
   useEffect(() => {
     if (!session) return;
 
     const processPhase = async () => {
-      // Both commitments -> send key reveal
-      if (session.myCommitment && session.theirCommitmentHash && !sentKeyReveal.current) {
-        sentKeyReveal.current = true;
-
-        sendToPeer(session.peerNodeId, {
-          type: 'key_reveal',
-          macKey: session.myChallenge!.macKey,
-        });
-
-        setSession(prev => {
-          if (!prev) return null;
-          if (prev.phase === 'awaiting_peer_commitment' || prev.phase === 'awaiting_peer_key') {
-            return {
-              ...prev,
-              phase: prev.theirMacKey ? 'verifying_binding' : 'awaiting_peer_key',
-            };
-          }
-          return prev;
-        });
-      }
-
-      // Have peer key but stuck -> advance
-      if (session.phase === 'awaiting_peer_key' && session.theirMacKey && session.myCommitment) {
-        setSession(prev => prev ? { ...prev, phase: 'verifying_binding' } : null);
-        return;
-      }
-
-      // Verify binding
-      if (session.phase === 'verifying_binding' && session.theirMacKey && !sentSolution.current) {
-        const isValid = await verifyChallengeBound(
-          session.theirHmacBinding!,
-          session.theirMacKey,
-          publicKeyBase64,
-          session.peerPublicKey
-        );
-
-        if (!isValid) {
-          setSession(prev => prev ? {
-            ...prev,
-            phase: 'failed',
-            errorMessage: 'Challenge binding verification failed - potential proxy attack!',
-          } : null);
-
-          sendToPeer(session.peerNodeId, {
-            type: 'error',
-            code: 'BINDING_FAILED',
-            message: 'Challenge binding verification failed',
-          });
-          return;
-        }
-
+      // Both commitments -> go straight to sending solution
+      if (session.myCommitment && session.theirCommitmentHash && session.bindingVerified && !sentSolution.current) {
         sentSolution.current = true;
 
         sendToPeer(session.peerNodeId, {
@@ -356,7 +330,7 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
         }
 
         const solutionCorrect = verifySolution(
-          session.myChallenge!.hmacBinding,
+          session.myChallenge!.bindingSeed,
           session.theirSolution,
           ppeType,
           difficulty
@@ -433,7 +407,7 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
     session?.phase,
     session?.myCommitment,
     session?.theirCommitmentHash,
-    session?.theirMacKey,
+    session?.bindingVerified,
     session?.mySolution,
     session?.theirSolution,
     session?.mySignature,

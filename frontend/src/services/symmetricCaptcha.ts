@@ -2,7 +2,7 @@
  * Core PPE protocol layer (Protocol 3).
  *
  * Handles the crypto plumbing between two peers:
- *   - HMAC binding:  HMAC(k, sorted(PubA, PubB)) — prevents proxy attacks
+ *   - ECDSA binding: sign(sorted(PubA, PubB)) — prevents proxy attacks
  *   - Commit-reveal: SHA-256(solution:nonce) — ensures fairness
  *   - Signature swap: ECDSA P-256 — certifies the edge
  *
@@ -18,28 +18,22 @@ import { getProvider, DEFAULT_PPE_TYPE } from './ppe/registry';
 export type PpeMessageType =
   | 'ppe.challenge'      // Step 1: Exchange challenges
   | 'ppe.commitment'     // Step 2: Exchange commitment hashes
-  | 'ppe.key_reveal'     // Step 3: Reveal MAC key k
-  | 'ppe.solution'       // Step 4: Send actual solution
-  | 'ppe.signature'      // Step 5: Send signature if solution correct
-  | 'ppe.complete'       // Step 6: Finalization
+  | 'ppe.solution'       // Step 3: Send actual solution
+  | 'ppe.signature'      // Step 4: Send signature if solution correct
+  | 'ppe.complete'       // Step 5: Finalization
   | 'ppe.error';         // Error state
 
 export interface PpeChallenge {
   type: 'ppe.challenge';
   challengeImage: string;       // Base64 encoded challenge image or text
   challengeType: string;        // PPE provider type (e.g., 'math_captcha')
-  hmacBinding: string;          // HMAC(k, sorted(myPub, peerPub)) - for later verification
+  bindingSignature: string;     // ECDSA signature of sorted(myPub, peerPub) - verified immediately
 }
 
 export interface PpeCommitment {
   type: 'ppe.commitment';
   commitmentHash: string;       // SHA256(solution + nonce)
   nonce: string;                // Random nonce for commitment
-}
-
-export interface PpeKeyReveal {
-  type: 'ppe.key_reveal';
-  macKey: string;               // The secret k used to seed the CAPTCHA
 }
 
 export interface PpeSolution {
@@ -69,7 +63,6 @@ export interface PpeError {
 export type PpeMessage =
   | PpeChallenge
   | PpeCommitment
-  | PpeKeyReveal
   | PpeSolution
   | PpeSignature
   | PpeComplete
@@ -80,8 +73,8 @@ export type PpeMessage =
 export interface GeneratedChallenge {
   question: string;             // The challenge question/text
   answer: string;               // The correct answer
-  macKey: string;               // The secret k
-  hmacBinding: string;          // HMAC(k, binding_material)
+  bindingSignature: string;     // ECDSA signature of binding material
+  bindingSeed: string;          // Hash of signature, used as deterministic seed
   challengeImage: string;       // Rendered challenge (base64 or text)
 }
 
@@ -94,82 +87,54 @@ function generateRandomHex(bytes: number): string {
     .join('');
 }
 
-/** HMAC-SHA256 via Web Crypto. */
-async function computeHMAC(key: string, data: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const keyData = encoder.encode(key);
-  const message = encoder.encode(data);
-
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw',
-    keyData,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-
-  const signature = await crypto.subtle.sign('HMAC', cryptoKey, message);
-  const hashArray = Array.from(new Uint8Array(signature));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
 /**
  * Generate a challenge cryptographically bound to both peers.
  * The actual task (math, storage, etc.) is delegated to the PPEProvider;
- * this function only handles the HMAC binding layer.
+ * this function only handles the ECDSA binding layer.
  *
- * @param myPublicKey - My public key
- * @param peerPublicKey - Peer's public key
+ * @param myPublicKey - My public key (base64)
+ * @param peerPublicKey - Peer's public key (base64)
+ * @param signMessage - Callback to sign with private key (already threaded through system)
  * @param ppeType - PPE provider type
  * @param difficulty - Difficulty level (0.0-1.0), derived from η_E as (1 - η_E)
  */
 export async function generateBoundChallenge(
   myPublicKey: string,
   peerPublicKey: string,
+  signMessage: (msg: string) => Promise<string>,
   ppeType: string = DEFAULT_PPE_TYPE,
   difficulty: number = 0.5
 ): Promise<GeneratedChallenge> {
   const provider = getProvider(ppeType);
 
-  const macKey = generateRandomHex(32);
-
-  // sorted so both peers derive the same binding
+  // sorted so both peers derive the same binding material
   const sortedKeys = [myPublicKey, peerPublicKey].sort();
-  const bindingMaterial = sortedKeys.join(':');
+  const bindingMaterial = `PPE-BIND:${sortedKeys.join(':')}`;
 
-  const hmacBinding = await computeHMAC(macKey, bindingMaterial);
-  const { challengeImage, answer } = provider.generateChallenge(hmacBinding, difficulty);
+  const bindingSignature = await signMessage(bindingMaterial);
+
+  // Hash the signature to produce a deterministic seed for the provider
+  const bindingSeed = await hashString(bindingSignature);
+  const { challengeImage, answer } = provider.generateChallenge(bindingSeed, difficulty);
 
   return {
     question: provider.extractDisplay(challengeImage),
     answer,
-    macKey,
-    hmacBinding,
+    bindingSignature,
+    bindingSeed,
     challengeImage,
   };
 }
 
-/** Re-derive HMAC with the revealed key and check it matches the one from the challenge. */
-export async function verifyChallengeBound(
-  receivedHmac: string,
-  macKey: string,
-  myPublicKey: string,
-  peerPublicKey: string
-): Promise<boolean> {
-  const sortedKeys = [myPublicKey, peerPublicKey].sort();
-  const computedHmac = await computeHMAC(macKey, sortedKeys.join(':'));
-  return computedHmac === receivedHmac;
-}
-
 /** Regenerate expected answer from seed via the provider and compare. */
 export function verifySolution(
-  hmacBinding: string,
+  bindingSeed: string,
   providedSolution: string,
   ppeType: string = DEFAULT_PPE_TYPE,
   difficulty: number = 0.5
 ): boolean {
   const provider = getProvider(ppeType);
-  return provider.validateSolution(hmacBinding, providedSolution, difficulty);
+  return provider.validateSolution(bindingSeed, providedSolution, difficulty);
 }
 
 // Commit-reveal scheme
@@ -205,8 +170,6 @@ export type PpeState =
   | 'challenges_exchanged'     // Both challenges received
   | 'awaiting_commitment'      // Sent commitment, waiting for theirs
   | 'commitments_exchanged'    // Both commitments received
-  | 'awaiting_key_reveal'      // Sent key reveal, waiting for theirs
-  | 'keys_revealed'            // Both keys revealed and verified
   | 'awaiting_solution'        // Sent solution, waiting for theirs
   | 'solutions_exchanged'      // Both solutions received
   | 'awaiting_signature'       // Sent signature, waiting for theirs
@@ -226,8 +189,7 @@ export interface PpeSessionState {
 
   // Their challenge (they generated, I solve)
   theirChallengeImage?: string;
-  theirHmacBinding?: string;
-  theirMacKey?: string;        // Revealed later
+  theirBindingSignature?: string;
   mySolution?: string;         // My solution to their challenge
 
   // Commitment phase
@@ -280,7 +242,7 @@ export async function processMessage(
   switch (message.type) {
     case 'ppe.challenge': {
       state.theirChallengeImage = message.challengeImage;
-      state.theirHmacBinding = message.hmacBinding;
+      state.theirBindingSignature = message.bindingSignature;
 
       if (state.myChallenge) {
         state.state = 'challenges_exchanged';
@@ -297,37 +259,6 @@ export async function processMessage(
         state.state = 'commitments_exchanged';
       } else {
         state.state = 'awaiting_commitment';
-      }
-      return { newState: state };
-    }
-
-    case 'ppe.key_reveal': {
-      const isValid = await verifyChallengeBound(
-        state.theirHmacBinding!,
-        message.macKey,
-        state.myPublicKey,
-        state.peerPublicKey
-      );
-
-      if (!isValid) {
-        state.state = 'failed';
-        state.errorMessage = 'Challenge binding verification failed - potential proxy attack';
-        return {
-          newState: state,
-          response: {
-            type: 'ppe.error',
-            code: 'BINDING_FAILED',
-            message: state.errorMessage,
-          },
-        };
-      }
-
-      state.theirMacKey = message.macKey;
-
-      if (state.myChallenge) {
-        state.state = 'keys_revealed';
-      } else {
-        state.state = 'awaiting_key_reveal';
       }
       return { newState: state };
     }
@@ -355,7 +286,7 @@ export async function processMessage(
       state.theirSolution = message.solution;
       state.theirNonce = message.nonce;
 
-      const isCorrect = verifySolution(state.myChallenge!.hmacBinding, message.solution, ppeType, difficulty);
+      const isCorrect = verifySolution(state.myChallenge!.bindingSeed, message.solution, ppeType, difficulty);
 
       if (!isCorrect) {
         state.state = 'failed';

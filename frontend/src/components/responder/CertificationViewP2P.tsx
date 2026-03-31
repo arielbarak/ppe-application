@@ -53,6 +53,10 @@ export function CertificationViewP2P({
   const pendingRequestsRef = useRef(pendingRequests);
   pendingRequestsRef.current = pendingRequests;
 
+  // Ref-based message handler to break the circular dependency between
+  // useWebSocket -> sendMessage -> usePpeHandshake -> handleWSMessage -> useWebSocket
+  const handleWSMessageRef = useRef<(message: WSMessage) => void>(() => {});
+
   // Data fetching
   const fetchCertificationStatus = useCallback(async () => {
     try {
@@ -120,12 +124,14 @@ export function CertificationViewP2P({
     }
   }, [sessionId, nodeId]);
 
-  // P2P Message Relay
+  // Single WebSocket connection — uses a ref-based handler to avoid circular deps
   const { isConnected, sendMessage } = useWebSocket({
     sessionId,
     nodeId,
     role: 'responder',
-    onMessage: () => {}, // Will be set after hook initialization
+    onMessage: useCallback((message: WSMessage) => {
+      handleWSMessageRef.current(message);
+    }, []),
   });
 
   const sendToPeer = useCallback((targetNode: string, payload: PpePayload) => {
@@ -153,54 +159,47 @@ export function CertificationViewP2P({
     },
   });
 
-  // WebSocket Message Handling
-  const handleWSMessage = useCallback(async (message: WSMessage) => {
-    switch (message.type) {
-      case 'ppe.request': {
-        const { ppe_session_id, from_node } = message.data as any;
+  // Keep the ref updated with the latest handler that closes over current handshake state
+  useEffect(() => {
+    handleWSMessageRef.current = (message: WSMessage) => {
+      switch (message.type) {
+        case 'ppe.request': {
+          const { ppe_session_id, from_node } = message.data as any;
 
-        if (handshake.isActive && handshake.session?.peerNodeId === from_node) {
-          // Conflict - use node ID ordering
-          if (nodeId < from_node) {
-            console.log(`[P2P] Conflict: we initiate, ignoring their request`);
-            break;
+          if (handshake.isActive && handshake.session?.peerNodeId === from_node) {
+            if (nodeId < from_node) {
+              console.log(`[P2P] Conflict: we initiate, ignoring their request`);
+              break;
+            }
           }
+
+          setPendingRequests(prev => ({ ...prev, [from_node]: { sessionId: ppe_session_id, fromNode: from_node } }));
+          setNeighbors(prev => prev.map(n => n.nodeId === from_node ? { ...n, hasPendingRequest: true } : n));
+          break;
         }
 
-        setPendingRequests(prev => ({ ...prev, [from_node]: { sessionId: ppe_session_id, fromNode: from_node } }));
-        setNeighbors(prev => prev.map(n => n.nodeId === from_node ? { ...n, hasPendingRequest: true } : n));
-        break;
-      }
-
-      case 'ppe.initiated': {
-        const { ppe_session_id } = message.data as any;
-        handshake.updateSessionId(ppe_session_id);
-        break;
-      }
-
-      case 'ppe.message': {
-        const { from_node, payload } = message.data as any;
-        handshake.handlePeerMessage(from_node, payload as PpePayload);
-        break;
-      }
-
-      case 'status_change':
-      case 'status.changed': {
-        if (message.data.new_status === 'voting') {
-          onComplete();
+        case 'ppe.initiated': {
+          const { ppe_session_id } = message.data as any;
+          handshake.updateSessionId(ppe_session_id);
+          break;
         }
-        break;
+
+        case 'ppe.message': {
+          const { from_node, payload } = message.data as any;
+          handshake.handlePeerMessage(from_node, payload as PpePayload);
+          break;
+        }
+
+        case 'status_change':
+        case 'status.changed': {
+          if (message.data.new_status === 'voting') {
+            onComplete();
+          }
+          break;
+        }
       }
-    }
+    };
   }, [handshake, nodeId, onComplete]);
-
-  // Re-register message handler
-  const { sendMessage: _, ...wsRest } = useWebSocket({
-    sessionId,
-    nodeId,
-    role: 'responder',
-    onMessage: handleWSMessage,
-  });
 
   // Conflict resolution helper
   const shouldInitiate = (myId: string, peerId: string): boolean => myId < peerId;
@@ -347,14 +346,6 @@ export function CertificationViewP2P({
             <WaitingSpinner color="blue" text="Waiting for peer's commitment..." subtext="Your solution is committed securely" />
           )}
 
-          {phase === 'awaiting_peer_key' && (
-            <WaitingSpinner color="green" text="Both committed! Exchanging keys..." subtext="Verifying challenge bindings" />
-          )}
-
-          {phase === 'verifying_binding' && (
-            <WaitingSpinner color="yellow" text="Verifying challenge binding..." subtext="Checking HMAC proof" />
-          )}
-
           {(phase === 'awaiting_peer_solution' || phase === 'signing') && (
             <WaitingSpinner color="purple" text="Exchanging solutions and signatures..." subtext="Almost done!" />
           )}
@@ -396,7 +387,7 @@ export function CertificationViewP2P({
       <Card title="Certification Phase (P2P Protocol 3)" className="max-w-2xl w-full">
         <div className="mb-4 p-3 bg-green-50 rounded text-sm text-green-800">
           <p className="font-semibold">Decentralized PPE Mode</p>
-          <p>Challenges are generated locally with HMAC binding to prevent proxy attacks.</p>
+          <p>Challenges are generated locally with signature binding to prevent proxy attacks.</p>
         </div>
 
         <div className="mb-6">

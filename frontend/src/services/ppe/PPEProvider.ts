@@ -29,7 +29,7 @@ export function deriveDifficultyFromEtaE(etaE: number): number {
 /**
  * A generated challenge produced by a PPEProvider.
  *
- * The core layer wraps this with HMAC binding (macKey, hmacBinding)
+ * The core layer wraps this with ECDSA signature binding
  * to prevent proxy attacks.
  */
 export interface PPEChallenge {

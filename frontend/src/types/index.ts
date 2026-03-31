@@ -132,9 +132,8 @@ export interface WSMessage {
  * These are relayed blindly through the server
  */
 export type PpePayloadType =
-  | 'challenge'      // Exchange challenges (includes HMAC binding)
+  | 'challenge'      // Exchange challenges (includes ECDSA binding signature)
   | 'commitment'     // Exchange commitment hashes
-  | 'key_reveal'     // Reveal MAC key to prove challenge binding
   | 'solution'       // Send actual CAPTCHA solution
   | 'signature'      // Send signature if solution correct
   | 'complete'       // Finalization
