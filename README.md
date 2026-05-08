@@ -41,6 +41,29 @@ npm run dev
 
 The frontend will be available at http://localhost:3000.
 
+## Tests
+
+The backend ships with a pytest suite covering the cryptographic core, the PPE state machine, the in-memory storage, and every API route plus a full 6-phase end-to-end flow.
+
+```bash
+cd backend
+pip install -r requirements.txt
+pytest tests -q                                                # full suite
+pytest tests/unit -q                                           # fast unit subset (~2s)
+pytest tests/integration -q                                    # API + flow tests
+pytest tests --cov=app --cov-report=term-missing               # with coverage
+```
+
+Useful filters:
+
+```bash
+pytest -k verify_global -v                                     # focus on a name
+pytest tests/integration/test_full_protocol_flow.py -v         # walk the 6-phase flow
+pytest tests/integration/test_fault_injection.py -v            # hostile-pollster scenarios
+```
+
+Two tests are marked `xfail(strict=True)` against the unimplemented commit-reveal check at `app/ppe/coordinator.py:165`. They will start failing the moment that TODO is fixed, prompting promotion to real assertions.
+
 ## Architecture
 
 ### Blind Relay Design
