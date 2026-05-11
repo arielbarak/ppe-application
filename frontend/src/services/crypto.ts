@@ -1,4 +1,5 @@
-// TODO: Switch to IndexedDB. Keys are extractable to survive refresh.
+// Keys are generated extractable so they can be persisted to IndexedDB
+// (see services/keyStore.ts) and survive a page refresh.
 
 export async function generateKeyPair(): Promise<CryptoKeyPair> {
   const keyPair = await window.crypto.subtle.generateKey(

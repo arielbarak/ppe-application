@@ -1,25 +1,52 @@
 /**
  * React hook for client-side cryptography
  *
- * Manages key generation and signing operations.
- * Keys are ephemeral and exist only in memory for the current session.
+ * Manages key generation and signing operations. Keys are persisted to
+ * IndexedDB (see services/keyStore.ts) so the responder's identity survives
+ * a page refresh; clearKeys() removes both the in-memory state and the
+ * IndexedDB entry.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   generateKeyPair as generateKeyPairCrypto,
   exportPublicKey,
   signMessage as signMessageCrypto,
   hashString,
 } from '../services/crypto';
+import {
+  loadKeyPair,
+  saveKeyPair,
+  clearKeyPair as clearKeyPairStore,
+} from '../services/keyStore';
 
 export function useCrypto() {
   const [keyPair, setKeyPair] = useState<CryptoKeyPair | null>(null);
   const [publicKeyBase64, setPublicKeyBase64] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
 
+  // On first mount, try to rehydrate a previously-persisted key pair.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const stored = await loadKeyPair();
+      if (cancelled || !stored) return;
+      try {
+        const pubKeyB64 = await exportPublicKey(stored.publicKey);
+        setKeyPair(stored);
+        setPublicKeyBase64(pubKeyB64);
+        console.log('Key pair rehydrated from IndexedDB');
+      } catch (e) {
+        console.warn('Failed to rehydrate stored key pair', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   /**
-   * Generate new key pair
+   * Generate new key pair and persist it to IndexedDB.
    */
   const generateKeyPair = useCallback(async () => {
     try {
@@ -29,8 +56,9 @@ export function useCrypto() {
 
       setKeyPair(newKeyPair);
       setPublicKeyBase64(pubKeyB64);
+      await saveKeyPair(newKeyPair);
 
-      console.log('Key pair generated successfully');
+      console.log('Key pair generated and persisted');
 
       return { keyPair: newKeyPair, publicKey: pubKeyB64 };
     } catch (error) {
@@ -77,12 +105,13 @@ export function useCrypto() {
   }, []);
 
   /**
-   * Clear keys (e.g., when switching modes)
+   * Clear keys from memory and the IndexedDB keystore.
    */
-  const clearKeys = useCallback(() => {
+  const clearKeys = useCallback(async () => {
     setKeyPair(null);
     setPublicKeyBase64(null);
-    console.log('Keys cleared from memory');
+    await clearKeyPairStore();
+    console.log('Keys cleared from memory and IndexedDB');
   }, []);
 
   return {

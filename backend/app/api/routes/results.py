@@ -26,9 +26,19 @@ async def publish_results(
     session = get_session_or_404(session_id)
     require_status(session, "voting", "publish results")
 
-    # TODO: verify pollster key matches session.public_key
-    if not x_pollster_key:
+    # Pollster identity check: if the caller supplies their key, it must match
+    # the one stored on the session. We don't yet require the header (legacy
+    # clients call without it), but mismatches are rejected outright.
+    if x_pollster_key is None:
         logger.warning("Publishing without pollster key verification")
+    elif x_pollster_key != session.public_key:
+        logger.warning(
+            f"Pollster key mismatch on publish for session {session_id}"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="X-Pollster-Key does not match session public key",
+        )
 
     published_results = storage.publish_results(session_id)
 
