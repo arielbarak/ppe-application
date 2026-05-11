@@ -1,10 +1,16 @@
 """Unit tests for app.ppe.coordinator (PPE handshake state machine)."""
 
+import hashlib
 from datetime import datetime, timedelta
 
 import pytest
 
 from tests.fixtures import solve_math_captcha
+
+
+def _commit(solution: str) -> str:
+    """SHA-256 hex digest used as the commitment for a solution."""
+    return hashlib.sha256(solution.encode("utf-8")).hexdigest()
 
 
 # Helpers
@@ -26,10 +32,14 @@ def _drive_to_solved(coordinator, captcha_provider, init="alice", resp="bob",
     """Walk a session through initiated -> committed -> solved. Returns (session, sol_i, sol_j)."""
     session = coordinator.initiate_ppe(init, resp, captcha_provider)
     correct_i, correct_j = _solutions_for(session)
-    coordinator.submit_commitment(session.id, init, "commit-i")
-    coordinator.submit_commitment(session.id, resp, "commit-j")
-    coordinator.submit_solution(session.id, init, sol_i if sol_i is not None else correct_i, sig_i)
-    coordinator.submit_solution(session.id, resp, sol_j if sol_j is not None else correct_j, sig_j)
+    submitted_i = sol_i if sol_i is not None else correct_i
+    submitted_j = sol_j if sol_j is not None else correct_j
+    # Commitments are SHA-256 of the solution we are about to submit so the
+    # commit-reveal check in verify_and_finalize opens cleanly.
+    coordinator.submit_commitment(session.id, init, _commit(submitted_i))
+    coordinator.submit_commitment(session.id, resp, _commit(submitted_j))
+    coordinator.submit_solution(session.id, init, submitted_i, sig_i)
+    coordinator.submit_solution(session.id, resp, submitted_j, sig_j)
     return session
 
 
@@ -237,49 +247,44 @@ def test_get_statistics_counts_by_status(coordinator, captcha_provider):
     assert stats["by_status"]["verified"] == 1
 
 
-# Commit-reveal enforcement (TODO at coordinator.py:165)
+# Commit-reveal enforcement
 
 
-@pytest.mark.xfail(strict=True, reason="commit-reveal not enforced - coordinator.py:165")
 def test_verify_and_finalize_rejects_solution_not_matching_commitment(coordinator, captcha_provider):
-    """
-    When commit-reveal is properly enforced, submitting a solution that does
-    NOT hash to the previously-recorded commitment must fail verification.
-    Today the coordinator only validates the solution against the challenge,
-    so this assertion is expected to fail until coordinator.py:165 is fixed.
-    """
+    """A solution that does not hash to the recorded commitment is rejected."""
     session = coordinator.initiate_ppe("alice", "bob", captcha_provider)
     correct_i, correct_j = _solutions_for(session)
 
-    # Initiator commits hash of "fake-X" but submits the correct solution.
-    # An honest verifier must reject this because the commitment doesn't open
-    # to the submitted value.
-    coordinator.submit_commitment(session.id, "alice", "sha256-of-fake-X")
-    coordinator.submit_commitment(session.id, "bob", "sha256-of-fake-Y")
+    # Commit to a different value than what each side will reveal.
+    coordinator.submit_commitment(session.id, "alice", _commit("not-the-real-solution"))
+    coordinator.submit_commitment(session.id, "bob", _commit("also-not-real"))
     coordinator.submit_solution(session.id, "alice", correct_i, "sig-i")
     coordinator.submit_solution(session.id, "bob", correct_j, "sig-j")
 
     result = coordinator.verify_and_finalize(session.id, captcha_provider)
-    assert result["success"] is False, (
-        "Solution did not open the commitment - must be rejected"
-    )
+    assert result["success"] is False
+    assert result["initiator_correct"] is False
+    assert result["responder_correct"] is False
+    assert session.status == "failed"
 
 
-@pytest.mark.xfail(strict=True, reason="commit-reveal not enforced - coordinator.py:165")
 def test_verify_and_finalize_rejects_missing_commitment_payload(coordinator, captcha_provider):
-    """
-    With proper commit-reveal, finalize must require commitments to be present.
-    Currently the coordinator accepts commitments=None and proceeds.
-    """
+    """If no commitment was recorded, finalize fails closed."""
     session = coordinator.initiate_ppe("alice", "bob", captcha_provider)
     correct_i, correct_j = _solutions_for(session)
 
-    # Skip commitments entirely: jump straight to solved by force-mutating status
-    session.status = "committed"  # bypass the gate intentionally
+    # Force the gate open without recording commitments, then submit solutions.
+    session.status = "committed"
     coordinator.submit_solution(session.id, "alice", correct_i, "sig-i")
     coordinator.submit_solution(session.id, "bob", correct_j, "sig-j")
 
     result = coordinator.verify_and_finalize(session.id, captcha_provider)
-    assert result["success"] is False, (
-        "No commitment was recorded - finalize must reject"
-    )
+    assert result["success"] is False
+
+
+def test_verify_and_finalize_passes_when_both_sides_open_commitments(coordinator, captcha_provider):
+    """Symmetric positive: real commitments + correct solutions -> verified."""
+    session = _drive_to_solved(coordinator, captcha_provider)
+    result = coordinator.verify_and_finalize(session.id, captcha_provider)
+    assert result["success"] is True
+    assert session.status == "verified"

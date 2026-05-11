@@ -162,12 +162,23 @@ class PPECoordinator:
             logger.warning(f"PPE session {session_id} not in solved state (status: {session.status})")
             return None
 
-        # TODO: verify hash(solution) == commitment in production
-        i_correct = captcha_validator.validate(
+        # Commit-reveal: the submitted solution must open the previously-recorded
+        # commitment. We hash the solution with SHA-256 and compare to the hex digest
+        # stored at submit_commitment() time. A missing commitment fails closed.
+        def _opens(commitment, solution):
+            if not commitment or solution is None:
+                return False
+            digest = hashlib.sha256(solution.encode("utf-8")).hexdigest()
+            return digest == commitment
+
+        i_opens = _opens(session.commitment_i, session.solution_i)
+        j_opens = _opens(session.commitment_j, session.solution_j)
+
+        i_correct = i_opens and captcha_validator.validate(
             session.challenge_j_to_i,
             session.solution_i
         )
-        j_correct = captcha_validator.validate(
+        j_correct = j_opens and captcha_validator.validate(
             session.challenge_i_to_j,
             session.solution_j
         )

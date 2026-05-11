@@ -62,7 +62,15 @@ pytest tests/integration/test_full_protocol_flow.py -v         # walk the 6-phas
 pytest tests/integration/test_fault_injection.py -v            # hostile-pollster scenarios
 ```
 
-Two tests are marked `xfail(strict=True)` against the unimplemented commit-reveal check at `app/ppe/coordinator.py:165`. They will start failing the moment that TODO is fixed, prompting promotion to real assertions.
+### Scale test
+
+`tests/integration/test_scale.py` walks all six phases with **50 responders** using Theorem 4.4 medium-security parameters (kappa=80, p ~ 0.26, average degree ~ 13). It registers 50 nodes, seeds every ideal-graph edge, casts a 30 / 20 split vote on q1, publishes, and asserts global ACCEPT plus a sample of local verifications. The test enforces a 30 s wall-clock budget so order-of-magnitude regressions surface immediately.
+
+```bash
+pytest tests/integration/test_scale.py -v                      # ~1s on a laptop
+pytest -m scale -v                                             # all scale tests
+pytest -m "not scale" -q                                       # skip scale tests
+```
 
 ## Architecture
 
