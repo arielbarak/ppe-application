@@ -93,11 +93,11 @@ async def websocket_endpoint(
                 await websocket.send_json(reply)
 
     except WebSocketDisconnect:
-        manager.disconnect(session_id, node_id)
+        manager.disconnect(session_id, node_id, websocket)
         logger.info(f"WebSocket disconnected: {node_id}")
     except Exception as e:
         logger.error(f"WebSocket error for {node_id}: {e}")
-        manager.disconnect(session_id, node_id)
+        manager.disconnect(session_id, node_id, websocket)
 
 
 if __name__ == "__main__":

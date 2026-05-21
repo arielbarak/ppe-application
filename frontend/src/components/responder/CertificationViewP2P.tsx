@@ -139,7 +139,6 @@ export function CertificationViewP2P({
   // PPE Handshake Hook
   const handshake = usePpeHandshake({
     nodeId,
-    publicKeyBase64,
     ppeType,
     difficulty,
     sendToPeer,
@@ -399,6 +398,7 @@ export function CertificationViewP2P({
 
           {certStatus && <CertificationStats certStatus={certStatus} neighborsCount={neighbors.length} />}
         </div>
+
 
         <NeighborList
           neighbors={neighbors}

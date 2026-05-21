@@ -113,26 +113,6 @@ export async function verifySignature(
 }
 
 /**
- * Verify that a challenge binding signature was produced by the peer
- * for this specific peer pair. Used in PPE Protocol 3 to prevent proxy attacks.
- */
-export async function verifyBindingSignature(
-  peerPublicKeyBase64: string,
-  myPublicKeyBase64: string,
-  signatureBase64: string
-): Promise<boolean> {
-  try {
-    const peerKey = await importPublicKey(peerPublicKeyBase64);
-    const sortedKeys = [myPublicKeyBase64, peerPublicKeyBase64].sort();
-    const bindingMaterial = `PPE-BIND:${sortedKeys.join(':')}`;
-    return await verifySignature(peerKey, bindingMaterial, signatureBase64);
-  } catch (error) {
-    console.error('Binding signature verification error:', error);
-    return false;
-  }
-}
-
-/**
  * Import public key from base64-encoded SPKI format
  * Used for verifying peer signatures
  */

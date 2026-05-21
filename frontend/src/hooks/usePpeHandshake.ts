@@ -16,7 +16,6 @@ import {
   verifyCommitment,
   type GeneratedChallenge,
 } from '../services/symmetricCaptcha';
-import { verifyBindingSignature } from '../services/crypto';
 
 export type HandshakePhase =
   | 'idle'
@@ -35,7 +34,6 @@ interface PpeSession {
   phase: HandshakePhase;
   myChallenge?: GeneratedChallenge;
   theirChallengeImage?: string;
-  theirBindingSignature?: string;
   mySolution?: string;
   myCommitment?: { commitmentHash: string; nonce: string };
   theirCommitmentHash?: string;
@@ -45,12 +43,10 @@ interface PpeSession {
   theirSignature?: string;
   solutionInput?: string;
   errorMessage?: string;
-  bindingVerified?: boolean;
 }
 
 interface UsePpeHandshakeOptions {
   nodeId: string;
-  publicKeyBase64: string;
   ppeType: string;
   difficulty: number;
   sendToPeer: (targetNode: string, payload: PpePayload) => void;
@@ -82,7 +78,6 @@ interface UsePpeHandshakeReturn {
 export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshakeReturn {
   const {
     nodeId,
-    publicKeyBase64,
     ppeType,
     difficulty,
     sendToPeer,
@@ -115,7 +110,6 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
     switch (payload.type) {
       case 'challenge':
         updated.theirChallengeImage = payload.challengeImage as string;
-        updated.theirBindingSignature = payload.bindingSignature as string;
         if (updated.myChallenge) {
           updated.phase = 'solving';
         }
@@ -184,13 +178,7 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
     targetPublicKey: string,
     existingSessionId?: string
   ) => {
-    const challenge = await generateBoundChallenge(
-      publicKeyBase64,
-      targetPublicKey,
-      signMessage,
-      ppeType,
-      difficulty
-    );
+    const challenge = await generateBoundChallenge(ppeType, difficulty);
 
     let initialSession: PpeSession = {
       sessionId: existingSessionId || '',
@@ -219,9 +207,8 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
       type: 'challenge',
       challengeImage: challenge.challengeImage,
       challengeType: ppeType,
-      bindingSignature: challenge.bindingSignature,
     });
-  }, [publicKeyBase64, ppeType, difficulty, bufferedMessages, applyMessage, sendToPeer, signMessage]);
+  }, [ppeType, difficulty, bufferedMessages, applyMessage, sendToPeer, signMessage]);
 
   // Update session ID (from server confirmation)
   const updateSessionId = useCallback((sessionId: string) => {
@@ -259,46 +246,13 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
     setSession(null);
   }, []);
 
-  // Verify binding signature when we receive a challenge
-  useEffect(() => {
-    if (!session || !session.theirBindingSignature || session.bindingVerified) return;
-
-    const verify = async () => {
-      const isValid = await verifyBindingSignature(
-        session.peerPublicKey,
-        publicKeyBase64,
-        session.theirBindingSignature!
-      );
-
-      if (!isValid) {
-        setSession(prev => prev ? {
-          ...prev,
-          phase: 'failed',
-          errorMessage: 'Challenge binding verification failed - potential proxy attack!',
-          bindingVerified: true,
-        } : null);
-
-        sendToPeer(session.peerNodeId, {
-          type: 'error',
-          code: 'BINDING_FAILED',
-          message: 'Challenge binding verification failed',
-        });
-        return;
-      }
-
-      setSession(prev => prev ? { ...prev, bindingVerified: true } : null);
-    };
-
-    verify();
-  }, [session?.theirBindingSignature, session?.bindingVerified, session?.peerPublicKey, publicKeyBase64, sendToPeer]);
-
   // State machine processing
   useEffect(() => {
     if (!session) return;
 
     const processPhase = async () => {
       // Both commitments -> go straight to sending solution
-      if (session.myCommitment && session.theirCommitmentHash && session.bindingVerified && !sentSolution.current) {
+      if (session.myCommitment && session.theirCommitmentHash && !sentSolution.current) {
         sentSolution.current = true;
 
         sendToPeer(session.peerNodeId, {
@@ -407,13 +361,11 @@ export function usePpeHandshake(options: UsePpeHandshakeOptions): UsePpeHandshak
     session?.phase,
     session?.myCommitment,
     session?.theirCommitmentHash,
-    session?.bindingVerified,
     session?.mySolution,
     session?.theirSolution,
     session?.mySignature,
     session?.theirSignature,
     nodeId,
-    publicKeyBase64,
     ppeType,
     difficulty,
     sendToPeer,

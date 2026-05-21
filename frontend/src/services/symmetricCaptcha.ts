@@ -13,14 +13,11 @@
 import { hashString } from './crypto';
 import { getProvider, DEFAULT_PPE_TYPE } from './ppe/registry';
 
-// Challenge generation with cryptographic binding
-
 export interface GeneratedChallenge {
-  question: string;             // The challenge question/text
-  answer: string;               // The correct answer
-  bindingSignature: string;     // ECDSA signature of binding material
-  bindingSeed: string;          // Hash of signature, used as deterministic seed
-  challengeImage: string;       // Rendered challenge (base64 or text)
+  question: string;
+  answer: string;
+  bindingSeed: string;
+  challengeImage: string;
 }
 
 /** Random hex string of `bytes` length. */
@@ -32,40 +29,17 @@ function generateRandomHex(bytes: number): string {
     .join('');
 }
 
-/**
- * Generate a challenge cryptographically bound to both peers.
- * The actual task (math, storage, etc.) is delegated to the PPEProvider;
- * this function only handles the ECDSA binding layer.
- *
- * @param myPublicKey - My public key (base64)
- * @param peerPublicKey - Peer's public key (base64)
- * @param signMessage - Callback to sign with private key (already threaded through system)
- * @param ppeType - PPE provider type
- * @param difficulty - Difficulty level (0.0-1.0), derived from η_E as (1 - η_E)
- */
 export async function generateBoundChallenge(
-  myPublicKey: string,
-  peerPublicKey: string,
-  signMessage: (msg: string) => Promise<string>,
   ppeType: string = DEFAULT_PPE_TYPE,
   difficulty: number = 0.5
 ): Promise<GeneratedChallenge> {
   const provider = getProvider(ppeType);
-
-  // sorted so both peers derive the same binding material
-  const sortedKeys = [myPublicKey, peerPublicKey].sort();
-  const bindingMaterial = `PPE-BIND:${sortedKeys.join(':')}`;
-
-  const bindingSignature = await signMessage(bindingMaterial);
-
-  // Hash the signature to produce a deterministic seed for the provider
-  const bindingSeed = await hashString(bindingSignature);
+  const bindingSeed = generateRandomHex(32);
   const { challengeImage, answer } = provider.generateChallenge(bindingSeed, difficulty);
 
   return {
     question: provider.extractDisplay(challengeImage),
     answer,
-    bindingSignature,
     bindingSeed,
     challengeImage,
   };

@@ -35,15 +35,26 @@ class ConnectionManager:
             }
         })
 
-    def disconnect(self, session_id: str, node_id: str):
-        if session_id in self.active_connections:
-            if node_id in self.active_connections[session_id]:
-                del self.active_connections[session_id][node_id]
-                logger.info(f"WebSocket disconnected: session={session_id}, node={node_id}")
+    def disconnect(self, session_id: str, node_id: str, websocket: Optional[WebSocket] = None):
+        if session_id not in self.active_connections:
+            return
 
-            if not self.active_connections[session_id]:  # clean up empty sessions
-                del self.active_connections[session_id]
-                logger.info(f"Session {session_id} removed (no active connections)")
+        current = self.active_connections[session_id].get(node_id)
+        if current is None:
+            return
+
+        # If a specific websocket is given, only remove if it's still the registered one.
+        # This prevents a reconnect's close event from evicting the new connection.
+        if websocket is not None and current is not websocket:
+            logger.info(f"Stale disconnect ignored for {node_id} (new connection already registered)")
+            return
+
+        del self.active_connections[session_id][node_id]
+        logger.info(f"WebSocket disconnected: session={session_id}, node={node_id}")
+
+        if not self.active_connections[session_id]:
+            del self.active_connections[session_id]
+            logger.info(f"Session {session_id} removed (no active connections)")
 
     async def send_to_node(self, session_id: str, node_id: str, message: dict):
         if session_id in self.active_connections:
@@ -54,7 +65,7 @@ class ConnectionManager:
                     logger.info(f"Sent to {node_id}: {message['type']}")
                 except Exception as e:
                     logger.error(f"Error sending to {node_id}: {e}")
-                    self.disconnect(session_id, node_id)
+                    self.disconnect(session_id, node_id, websocket)
             else:
                 logger.warning(f"Node {node_id} not found in session {session_id}. Connected nodes: {list(self.active_connections[session_id].keys())}")
         else:

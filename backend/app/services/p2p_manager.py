@@ -110,7 +110,7 @@ class P2PManager:
         peer_node = data.get("peer_node")
         sig = data.get("signature")
 
-        if not ppe_session_id or not peer_node:
+        if not peer_node:
             logger.warning(f"Invalid PPE complete from {node_id}")
             return
 
