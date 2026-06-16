@@ -2,9 +2,10 @@
  * Core PPE protocol layer (Protocol 3).
  *
  * Handles the crypto plumbing between two peers:
- *   - ECDSA binding: sign(sorted(PubA, PubB)) — prevents proxy attacks
  *   - Commit-reveal: SHA-256(solution:nonce) — ensures fairness
- *   - Signature swap: ECDSA P-256 — certifies the edge
+ *   - Signature swap: ECDSA P-256 — certifies the edge (a peer signature attests
+ *     the PPE was completed; it does NOT prevent a relay/proxy of the challenge,
+ *     which needs a challenge bound to both peers' keys — see report future work)
  *
  * The actual effort task (math, storage proof, etc.) is injected via
  * PPEProvider. This module doesn't care what the challenge is.
