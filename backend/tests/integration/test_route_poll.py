@@ -62,10 +62,11 @@ def test_recommend_params_endpoint(client):
 
 
 def test_validate_params_endpoint(client):
+    # m=5000, d~120 (p=120/4999), eta_E=0.125, eta_V=0.025 -> sound, C* ~ 10.
     resp = client.get(
         "/api/poll/params/validate"
-        "?expected_responders=100&edge_probability=0.14"
-        "&effort_threshold=0.15&validity_threshold=0.025&kappa=80"
+        "?expected_responders=5000&edge_probability=0.024"
+        "&effort_threshold=0.125&validity_threshold=0.025&kappa=80"
     )
     assert resp.status_code == 200
     body = resp.json()

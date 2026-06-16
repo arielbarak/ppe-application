@@ -1,6 +1,7 @@
 """Protocol 1: Poll creation and status management."""
 
 import logging
+import math
 import uuid
 from typing import Literal
 
@@ -83,26 +84,34 @@ async def get_recommended_params(
     - edge_probability (p): determines graph density
     - effort_threshold (η_E): max failure rate before node exclusion
     - validity_threshold (η_V): max exclusion rate before poll is invalid
-    - adversary_advantage (C*): bound on how much adversary can skew results
+    - adversary_advantage (C*): the multiplicative advantage from Theorem 4.4
 
-    Security levels:
-    - low: κ=40, suitable for casual polls, C* ≈ 1.15
-    - medium: κ=80, good balance, C* ≈ 1.08
-    - high: κ=128, high-stakes decisions, C* ≈ 1.04
+    C* is a worst-case bound and is typically much larger than 1; a higher
+    security level raises the degree to drive it down (low = minimum viable
+    degree, medium targets C* ≤ 20, high targets C* ≤ 8).
     """
     try:
         params = recommend_params_for_poll(expected_responders, security_level)
+
+        c_star = params.adversary_advantage
+        c_star_msg = (
+            "C* is unbounded: the chosen degree is below the Theorem 4.4 "
+            "soundness minimum for this poll size"
+            if math.isinf(c_star)
+            else f"C*={c_star:.2f}: the adversary has no more influence than an "
+                 f"honest user able to invest {c_star:.2f}x the effort"
+        )
 
         return {
             "recommended": params.to_dict(),
             "security_level": security_level,
             "explanation": {
                 "kappa": f"Security parameter κ={params.kappa} provides {2**params.kappa:.0e} adversary failure probability",
-                "expected_degree": f"Each node will have ~{params.expected_degree:.1f} neighbors on average",
+                "expected_degree": f"Each node will run ~{params.expected_degree:.1f} PPEs on average",
                 "edge_probability": f"p={params.edge_probability:.4f} yields connected graph with high probability",
                 "effort_threshold": f"Nodes failing >{params.effort_threshold*100:.1f}% of PPEs are excluded",
                 "validity_threshold": f"Poll invalid if >{params.validity_threshold*100:.2f}% of nodes excluded",
-                "adversary_advantage": f"C*={params.adversary_advantage:.3f} bounds adversary's influence to {(params.adversary_advantage-1)*100:.1f}%",
+                "adversary_advantage": c_star_msg,
             }
         }
 
@@ -143,8 +152,8 @@ async def validate_poll_params(
 async def compute_params_for_kappa(
     kappa: int = Query(..., ge=1, le=256, description="Security parameter κ"),
     expected_responders: int = Query(..., ge=2, description="Expected number of participants"),
-    honest_failure_rate: float = Query(0.05, ge=0, lt=1, description="Expected honest PPE failure rate"),
-    max_adversary_advantage: float = Query(1.1, gt=1, lt=2, description="Maximum acceptable C*"),
+    honest_failure_rate: float = Query(0.0, ge=0, lt=1, description="Honest PPE failure rate σ"),
+    max_adversary_advantage: float = Query(20.0, gt=1, description="Target upper bound on C*"),
 ):
     """
     Compute exact security parameters for a specific κ value.
@@ -160,12 +169,15 @@ async def compute_params_for_kappa(
             max_adversary_advantage=max_adversary_advantage,
         )
 
+        c_star = params.adversary_advantage
         return {
             "params": params.to_dict(),
             "bounds": {
                 "adversary_success_probability": f"≤ 2^(-{kappa}) ≈ {2**(-kappa):.2e}",
-                "adversary_advantage_C_star": f"{params.adversary_advantage:.4f}",
-                "max_skew_percentage": f"{(params.adversary_advantage - 1) * 100:.2f}%",
+                "adversary_advantage_C_star": (
+                    "unbounded" if math.isinf(c_star) else f"{c_star:.4f}"
+                ),
+                "soundness_precondition_ok": params.soundness_precondition_ok,
             }
         }
 

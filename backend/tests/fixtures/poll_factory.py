@@ -1,11 +1,45 @@
 """Helpers for building polls and walking the protocol in tests."""
 
-from typing import Any, Dict, List
+import json
+from typing import Any, Dict, List, Optional
 
 from fastapi.testclient import TestClient
 
 from app.crypto.graph import compute_node_id, determine_neighbors
 from app.storage.memory import InMemoryStorage
+
+from .keypair_factory import sign_b64
+
+
+def _keypair_index(keypairs: List) -> Dict[str, tuple]:
+    """Map node_id -> (private_key, public_key_b64) from (priv, pub, pub_b64, node_id) tuples."""
+    return {kp[3]: (kp[0], kp[2]) for kp in keypairs}
+
+
+def _canonical_vote_message(vote: Dict[str, Any]) -> str:
+    """Match the frontend's JSON.stringify(vote): compact, insertion-ordered JSON."""
+    return json.dumps(vote, separators=(",", ":"), ensure_ascii=False)
+
+
+def _edge_message(from_node: str, to_node: str, from_pub_b64: str) -> str:
+    """Message signed for a directed edge (from->to): carries the *from* node's pubkey."""
+    edge_label = "-".join(sorted([from_node, to_node]))
+    return f"PPE:{edge_label}:{from_pub_b64}"
+
+
+def signed_vote_payload(
+    keypair,
+    vote: Dict[str, str],
+    signatures: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """Build a /vote request body with a genuine self-signature over the ballot."""
+    priv, _pub, pub_b64, node_id = keypair
+    return {
+        "node_id": node_id,
+        "vote": vote,
+        "signatures": signatures or [],
+        "signature": sign_b64(priv, _canonical_vote_message(vote)),
+    }
 
 
 # Five reproducible node IDs derived from fixed pubkey strings. Use these wherever
@@ -105,18 +139,33 @@ def complete_certification_for_all(
     *,
     verified: bool = True,
     signature: str = "test-signature",
+    keypairs: Optional[List] = None,
 ) -> int:
-    """Seed every ideal-graph edge as a verified directed edge in storage. Returns edges added."""
+    """Seed every ideal-graph edge as a verified directed edge in storage. Returns edges added.
+
+    When ``keypairs`` is provided, each directed edge (from->to) is stamped with
+    a *genuine* signature: the recorded signature for (A->B) is B's signature
+    over ``PPE:{sorted(A,B)}:{pubkey(A)}``, matching the real p2p handshake. This
+    is required for tests that exercise the signature-checking verification path.
+    Without keypairs the legacy placeholder ``signature`` string is used (only
+    safe when the published results carry no public keys).
+    """
+    index = _keypair_index(keypairs) if keypairs else {}
     added = 0
     for node_id in node_ids:
         neighbors = determine_neighbors(node_id, node_ids, edge_probability)
         for neighbor in neighbors:
+            edge_sig = signature
+            if verified and index:
+                from_pub_b64 = index[node_id][1]
+                signer_priv = index[neighbor][0]  # edge (A->B) carries B's signature
+                edge_sig = sign_b64(signer_priv, _edge_message(node_id, neighbor, from_pub_b64))
             storage.add_certification_edge(
                 session_id=session_id,
                 from_node=node_id,
                 to_node=neighbor,
                 verified=verified,
-                signature=signature,
+                signature=edge_sig,
             )
             added += 1
     return added

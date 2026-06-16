@@ -19,16 +19,114 @@ computed against the full, independently-verified graph.
 """
 
 import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Set, Tuple, Optional
 
-from .graph import compute_exclusions, validate_certification_graph, determine_neighbors
+from .graph import compute_exclusions, validate_certification_graph, determine_neighbors, compute_node_id
+from .signatures import verify_signature
 
 logger = logging.getLogger(__name__)
 
 # Maximum value of a 256-bit SHA-256 hash (64 hex chars of 'f')
 _MAX_HASH = int('f' * 64, 16)
+
+
+def _canonical_vote_message(vote: Dict[str, Any]) -> str:
+    """Reproduce the exact string the client signed for its vote.
+
+    The frontend signs ``JSON.stringify(vote)`` (VotingView.tsx), which emits
+    compact JSON with no whitespace and preserves key insertion order. We mirror
+    that here so a genuine signature reconciles.
+    """
+    return json.dumps(vote, separators=(',', ':'), ensure_ascii=False)
+
+
+def _bound_public_key(node_id: str, public_keys: Dict[str, str]) -> Optional[str]:
+    """Return a node's public key only if it is self-consistent with its id.
+
+    Because ``node_id = SHA-256(public_key)[:16]`` (graph.compute_node_id), the
+    id-to-key binding is self-certifying: a verifier recomputes the id from the
+    published key and rejects any key that does not hash to it. This stops a
+    malicious pollster from substituting its own keypair for a participant and
+    then forging that participant's signatures.
+    """
+    pubkey = public_keys.get(node_id)
+    if not pubkey:
+        return None
+    if compute_node_id(pubkey) != node_id:
+        logger.warning(f"Published public key does not match node id {node_id}")
+        return None
+    return pubkey
+
+
+def _edge_signature_message(from_node: str, to_node: str, public_keys: Dict[str, str]) -> Optional[str]:
+    """Reproduce the message signed for a directed certification edge.
+
+    For a stored edge ``(from=A, to=B)`` the recorded signature is *B's*
+    signature over ``PPE:{sorted(A,B) joined by '-'}:{pubkey(A)}`` — see
+    usePpeHandshake.ts, where each peer signs the other's public key. Returns
+    None when A's public key is unknown (cannot reconstruct the message).
+    """
+    from_pubkey = _bound_public_key(from_node, public_keys)
+    if not from_pubkey:
+        return None
+    edge_label = '-'.join(sorted([from_node, to_node]))
+    return f"PPE:{edge_label}:{from_pubkey}"
+
+
+def _verify_edge_signature(
+    from_node: str,
+    to_node: str,
+    signature: Optional[str],
+    public_keys: Dict[str, str],
+) -> Optional[bool]:
+    """Verify a certification edge signature.
+
+    Returns True/False when the check can be performed, or None when there is
+    not enough information (no signature, or a missing public key) to decide —
+    in which case the caller falls back to the deterministic edge rule alone.
+    """
+    if not signature:
+        return None
+    signer_pubkey = _bound_public_key(to_node, public_keys)  # edge (A->B) carries B's signature
+    message = _edge_signature_message(from_node, to_node, public_keys)
+    if not signer_pubkey or message is None:
+        # If the bulletin publishes keys at all (strict mode), a missing or
+        # unbindable key for a signed edge is a failure; otherwise (legacy
+        # bulletin with no keys) we cannot check and defer to the edge rule.
+        return False if public_keys else None
+    return verify_signature(signer_pubkey, message, signature)
+
+
+def _verify_vote_signature(
+    response: Dict[str, Any],
+    public_keys: Dict[str, str],
+) -> Optional[bool]:
+    """Verify a voter's self-signature over its ballot.
+
+    Returns True/False when checkable, or None when the signature or the
+    voter's public key is unavailable.
+    """
+    signature = response.get('self_signature')
+    if not signature:
+        return None
+    node_id = response.get('node_id')
+
+    # Prefer the self-certifying map; fall back to a key carried on the response
+    # only if it too hashes to the claimed node id.
+    pubkey = _bound_public_key(node_id, public_keys)
+    if not pubkey:
+        candidate = response.get('public_key')
+        if candidate and compute_node_id(candidate) == node_id:
+            pubkey = candidate
+    if not pubkey:
+        # Strict mode (bulletin publishes keys): an unbindable key for a signed
+        # ballot is a failure. Legacy bulletin (no keys): cannot check.
+        return False if public_keys else None
+    message = _canonical_vote_message(response.get('vote', {}))
+    return verify_signature(pubkey, message, signature)
 
 
 @dataclass
@@ -51,6 +149,9 @@ class GraphDiscrepancies:
     missing_nodes: List[str] = field(default_factory=list)
     extra_nodes: List[str] = field(default_factory=list)
     unverified_edges: List[Tuple[str, str]] = field(default_factory=list)
+    # Edges whose published signature failed cryptographic verification. The
+    # edge is downgraded to "failed" so it cannot count toward certification.
+    invalid_signature_edges: List[Tuple[str, str]] = field(default_factory=list)
 
     @property
     def has_critical_issues(self) -> bool:
@@ -157,6 +258,7 @@ def _reconcile_graph(
     ideal_graph: Dict[str, Set[str]],
     published_index: Dict[Tuple[str, str], Dict[str, Any]],
     response_node_ids: Set[str],
+    public_keys: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict[str, List[EdgeObj]], GraphDiscrepancies]:
     """
     Walk every ideal edge. If the pollster published it, keep the reported
@@ -167,6 +269,7 @@ def _reconcile_graph(
     """
     verification_graph: Dict[str, List[EdgeObj]] = {nid: [] for nid in all_node_ids}
     discrepancies = GraphDiscrepancies()
+    public_keys = public_keys or {}
 
     # Check node consistency
     missing_nodes, extra_nodes = _check_node_consistency(
@@ -191,11 +294,25 @@ def _reconcile_graph(
 
             if published is not None:
                 is_verified = published.get('verified', False)
+                signature = published.get('signature')
+
+                # Cryptographically check the edge signature when possible. A
+                # claimed-verified edge whose signature does not validate is
+                # downgraded to failed: the pollster cannot manufacture
+                # certification by attaching a bogus signature string.
+                if is_verified:
+                    sig_ok = _verify_edge_signature(
+                        node_id, neighbor_id, signature, public_keys
+                    )
+                    if sig_ok is False:
+                        is_verified = False
+                        discrepancies.invalid_signature_edges.append((node_id, neighbor_id))
+
                 edge = EdgeObj(
                     from_node=node_id,
                     to_node=neighbor_id,
                     verified=is_verified,
-                    signature=published.get('signature'),
+                    signature=signature,
                     omitted=False,
                 )
                 verification_graph[node_id].append(edge)
@@ -240,6 +357,8 @@ def verify_local(
         'fabricated_edges': [],
         'verified_edges': 0,
         'unverified_edges': 0,
+        'self_signature_valid': None,
+        'invalid_signature_edges': [],
     }
 
     try:
@@ -260,11 +379,25 @@ def verify_local(
         parameters = published_results.get('parameters', {})
         all_node_ids = cert_graph.get('nodes', [])
         edge_probability = parameters.get('edge_probability', 0.5)
+        public_keys = (
+            published_results.get('public_keys')
+            or cert_graph.get('public_keys')
+            or {}
+        )
 
         if node_id not in all_node_ids:
             return False, f"Node {node_id} not in published node list", details
 
         details['in_node_list'] = True
+
+        # Confirm the recorded ballot really carries this node's signature.
+        self_sig_ok = _verify_vote_signature(node_vote, public_keys)
+        details['self_signature_valid'] = self_sig_ok
+        if self_sig_ok is False:
+            return False, (
+                f"Local verification FAILED: the published vote for node {node_id} "
+                f"does not carry a valid self-signature"
+            ), details
 
         # Reconstruct expected neighbors using SHA-256 hash logic
         expected_neighbors = set()
@@ -283,8 +416,22 @@ def verify_local(
 
         details['published_neighbors'] = len(published_from_node)
 
-        # Count verified vs unverified
-        verified_count = sum(1 for e in published_from_node.values() if e.get('verified', False))
+        # Cryptographically check the signatures on this node's own edges.
+        invalid_sig_edges = []
+        for to_node, edge in published_from_node.items():
+            if edge.get('verified', False):
+                sig_ok = _verify_edge_signature(
+                    node_id, to_node, edge.get('signature'), public_keys
+                )
+                if sig_ok is False:
+                    invalid_sig_edges.append(to_node)
+        details['invalid_signature_edges'] = invalid_sig_edges
+
+        # An edge with a bad signature does not count as verified.
+        verified_count = sum(
+            1 for to_node, e in published_from_node.items()
+            if e.get('verified', False) and to_node not in invalid_sig_edges
+        )
         details['verified_edges'] = verified_count
         details['unverified_edges'] = len(published_from_node) - verified_count
 
@@ -366,6 +513,14 @@ def verify_global(
         edge_probability = parameters.get('edge_probability', 0.5)
         all_node_ids = cert_graph_data.get('nodes', [])
 
+        # node_id -> public key map (published so verification needs no pollster
+        # cooperation). Tolerate either placement for backwards compatibility.
+        public_keys = (
+            published_results.get('public_keys')
+            or cert_graph_data.get('public_keys')
+            or {}
+        )
+
         if not all_node_ids:
             return _error_result("No nodes in published certification graph")
 
@@ -392,7 +547,8 @@ def verify_global(
 
         # Step 3: Reconcile graphs and detect all discrepancies
         verification_graph, discrepancies = _reconcile_graph(
-            all_node_ids, ideal_graph, published_index, response_node_ids
+            all_node_ids, ideal_graph, published_index, response_node_ids,
+            public_keys,
         )
 
         logger.info(
@@ -481,6 +637,7 @@ def verify_global(
         # Step 8: Tally votes from non-excluded nodes
         tally: Dict[str, Dict[str, int]] = {}
         valid_vote_count = 0
+        invalid_vote_signatures: List[str] = []
 
         for question in questions:
             q_id = question.get('id')
@@ -493,6 +650,16 @@ def verify_global(
 
             if resp_node_id in excluded_nodes:
                 logger.debug(f"Skipping vote from excluded node {resp_node_id}")
+                continue
+
+            # Drop ballots whose self-signature does not verify against the
+            # voter's published key: a vote nobody can prove was cast by its
+            # claimed owner must not be counted. Unsigned/unverifiable-key
+            # ballots (sig_ok is None) fall through to the legacy behaviour.
+            sig_ok = _verify_vote_signature(response, public_keys)
+            if sig_ok is False:
+                invalid_vote_signatures.append(resp_node_id)
+                logger.warning(f"Dropping vote from {resp_node_id}: invalid self-signature")
                 continue
 
             valid_vote_count += 1
@@ -532,6 +699,15 @@ def verify_global(
             notes = []
             if discrepancies.omitted_edges:
                 notes.append(f"{len(discrepancies.omitted_edges)} omitted edges counted as failures")
+            if discrepancies.invalid_signature_edges:
+                notes.append(
+                    f"{len(discrepancies.invalid_signature_edges)} edges downgraded "
+                    f"(invalid signature)"
+                )
+            if invalid_vote_signatures:
+                notes.append(
+                    f"{len(invalid_vote_signatures)} votes dropped (invalid self-signature)"
+                )
             if discrepancies.asymmetric_edges:
                 notes.append(f"{len(discrepancies.asymmetric_edges)} asymmetric edges detected")
             if discrepancies.extra_nodes:
@@ -569,10 +745,14 @@ def verify_global(
                 'fabricated_edge_count': len(discrepancies.fabricated_edges),
                 'asymmetric_edge_count': len(discrepancies.asymmetric_edges),
                 'unverified_edge_count': len(discrepancies.unverified_edges),
+                'invalid_signature_edge_count': len(discrepancies.invalid_signature_edges),
+                'invalid_vote_signature_count': len(invalid_vote_signatures),
                 'missing_node_count': len(discrepancies.missing_nodes),
                 'extra_node_count': len(discrepancies.extra_nodes),
                 'omitted_edges': discrepancies.omitted_edges[:20],
                 'asymmetric_edges': discrepancies.asymmetric_edges[:10],
+                'invalid_signature_edges': discrepancies.invalid_signature_edges[:10],
+                'invalid_vote_signatures': invalid_vote_signatures[:10],
                 'message': message,
             },
         }

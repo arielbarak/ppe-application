@@ -22,7 +22,7 @@ from app.crypto.verification import (
     verify_local,
 )
 
-from tests.fixtures import STABLE_NODE_IDS, build_published_results
+from tests.fixtures import STABLE_NODE_IDS, build_published_results, make_keypair
 
 
 def _find_absent_pair(node_ids, p):
@@ -463,3 +463,116 @@ def test_build_published_results_can_be_deepcopied_safely():
 
     assert base["responses"][0]["node_id"] == nodes[0]
     assert mutated["responses"][0]["node_id"] == "altered"
+
+
+# Signature verification (Protocol 6, point 5): the verifier must not trust the
+# pollster's "verified" flags — it cryptographically checks the edge and vote
+# signatures present in the bulletin.
+
+
+def _signed_results(n=4, p=1.0, **kwargs):
+    """Build published results with real keypairs, pubkeys, and signatures."""
+    keypairs = [make_keypair() for _ in range(n)]
+    node_ids = [kp[3] for kp in keypairs]
+    results = build_published_results(
+        node_ids, edge_probability=p, keypairs=keypairs,
+        effort_threshold=0.5, validity_threshold=0.5, **kwargs,
+    )
+    return results, node_ids, keypairs
+
+
+def test_global_accepts_genuinely_signed_bulletin():
+    results, node_ids, _ = _signed_results()
+
+    out = verify_global(results, eta_e=0.5, eta_v=0.5)
+
+    assert out["verification"] == "ACCEPT"
+    assert out["details"]["invalid_signature_edge_count"] == 0
+    assert out["details"]["invalid_vote_signature_count"] == 0
+    # Every node voted opt0 by default.
+    assert out["tally"]["q1"]["opt0"] == len(node_ids)
+
+
+def test_global_drops_vote_with_forged_self_signature():
+    results, node_ids, _ = _signed_results()
+    # Tamper one ballot's self-signature: it can no longer be proven authentic.
+    results["responses"][0]["self_signature"] = "AAAA"
+
+    out = verify_global(results, eta_e=0.5, eta_v=0.5)
+
+    assert out["details"]["invalid_vote_signature_count"] == 1
+    assert node_ids[0] in out["details"]["invalid_vote_signatures"]
+    # The forged ballot is excluded from the tally.
+    assert out["tally"]["q1"]["opt0"] == len(node_ids) - 1
+
+
+def test_global_downgrades_edge_with_forged_signature():
+    results, _, _ = _signed_results()
+    # Corrupt the signature on one verified edge.
+    for edge in results["certification_graph"]["edges"]:
+        if edge["verified"]:
+            edge["signature"] = "AAAA"
+            break
+
+    out = verify_global(results, eta_e=0.5, eta_v=0.5)
+
+    assert out["details"]["invalid_signature_edge_count"] >= 1
+
+
+def test_verify_local_rejects_forged_self_signature():
+    results, node_ids, _ = _signed_results()
+    results["responses"][0]["self_signature"] = "AAAA"
+
+    ok, message, details = verify_local(node_ids[0], results)
+
+    assert ok is False
+    assert details["self_signature_valid"] is False
+    assert "self-signature" in message
+
+
+def test_verify_local_accepts_genuinely_signed_node():
+    results, node_ids, _ = _signed_results()
+
+    ok, _message, details = verify_local(node_ids[0], results)
+
+    assert ok is True
+    assert details["self_signature_valid"] is True
+    assert details["invalid_signature_edges"] == []
+
+
+def test_global_rejects_substituted_public_key():
+    """A pollster that swaps in its own key for a node cannot pass the id binding.
+
+    node_id = SHA-256(pubkey)[:16], so replacing the published key (even with a
+    validly-signed ballot under the new key) breaks the self-certifying binding
+    and the ballot is dropped.
+    """
+    results, node_ids, _ = _signed_results()
+    attacker = make_keypair()  # (priv, pub, pub_b64, node_id)
+    victim = node_ids[0]
+
+    # Pollster substitutes its own public key for the victim and re-signs the
+    # victim's ballot under the attacker key.
+    results["public_keys"][victim] = attacker[2]
+    results["certification_graph"]["public_keys"][victim] = attacker[2]
+    from tests.fixtures import sign_b64
+    import json
+    for resp in results["responses"]:
+        if resp["node_id"] == victim:
+            resp["public_key"] = attacker[2]
+            resp["self_signature"] = sign_b64(
+                attacker[0],
+                json.dumps(resp["vote"], separators=(",", ":"), ensure_ascii=False),
+            )
+
+    out = verify_global(results, eta_e=0.5, eta_v=0.5)
+
+    # The substituted key does not hash to the victim's id, so it cannot be
+    # trusted: the victim's edges fail signature checks (-> exclusion via eta_E)
+    # and/or its ballot is dropped. Either path keeps the forged vote out.
+    caught = (
+        victim in out["details"].get("invalid_vote_signatures", [])
+        or victim in out.get("excluded_nodes", [])
+    )
+    assert caught
+    assert out["details"]["invalid_signature_edge_count"] >= 1

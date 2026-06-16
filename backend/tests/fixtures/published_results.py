@@ -1,9 +1,20 @@
 """Build canonical published_results dicts that match storage.publish_results() output."""
 
+import json
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.crypto.graph import determine_neighbors
+
+from .keypair_factory import sign_b64
+
+
+def _canonical_vote_message(vote: Dict[str, Any]) -> str:
+    return json.dumps(vote, separators=(",", ":"), ensure_ascii=False)
+
+
+def _edge_message(from_node: str, to_node: str, from_pub_b64: str) -> str:
+    return f"PPE:{'-'.join(sorted([from_node, to_node]))}:{from_pub_b64}"
 
 
 def build_published_results(
@@ -22,6 +33,7 @@ def build_published_results(
     extra_edges: Optional[Iterable[tuple]] = None,
     drop_edges: Optional[Iterable[tuple]] = None,
     mark_unverified_edges: Optional[Iterable[tuple]] = None,
+    keypairs: Optional[List] = None,
 ) -> Dict[str, Any]:
     """
     Assemble a published_results dict matching the shape produced by
@@ -48,16 +60,31 @@ def build_published_results(
     unverified_set = set(mark_unverified_edges or [])
     timestamp = datetime(2024, 1, 1, 12, 0, 0).isoformat()
 
+    # When keypairs are supplied, publish the node->pubkey map and stamp every
+    # verified edge / ballot with a *genuine* signature so the signature-checking
+    # verification path can be exercised. Otherwise fall back to placeholders
+    # (verification then has no public keys and skips the signature checks).
+    index = {kp[3]: (kp[0], kp[2]) for kp in keypairs} if keypairs else {}
+    public_keys = {nid: index[nid][1] for nid in node_ids if nid in index} if index else None
+
     edges: List[Dict[str, Any]] = []
     for node_id in node_ids:
         for neighbor in determine_neighbors(node_id, node_ids, edge_probability):
             if (node_id, neighbor) in drop_set:
                 continue
+            verified = (node_id, neighbor) not in unverified_set
+            sig = edge_signature
+            if verified and index and node_id in index and neighbor in index:
+                # edge (A->B) carries B's signature over PPE:{sorted(A,B)}:{pubkey(A)}
+                sig = sign_b64(
+                    index[neighbor][0],
+                    _edge_message(node_id, neighbor, index[node_id][1]),
+                )
             edges.append({
                 "from": node_id,
                 "to": neighbor,
-                "verified": (node_id, neighbor) not in unverified_set,
-                "signature": edge_signature,
+                "verified": verified,
+                "signature": sig,
                 "timestamp": timestamp,
             })
 
@@ -72,15 +99,26 @@ def build_published_results(
 
     responses = []
     for node_id, vote in votes.items():
+        sig = self_signature
+        if index and node_id in index:
+            sig = sign_b64(index[node_id][0], _canonical_vote_message(vote))
         responses.append({
             "node_id": node_id,
+            "public_key": index[node_id][1] if node_id in index else None,
             "vote": vote,
             "signatures": voter_signatures if voter_signatures is not None else [],
-            "self_signature": self_signature,
+            "self_signature": sig,
             "timestamp": timestamp,
         })
 
-    return {
+    cert_graph: Dict[str, Any] = {
+        "nodes": list(node_ids),
+        "edges": edges,
+    }
+    if public_keys is not None:
+        cert_graph["public_keys"] = public_keys
+
+    results: Dict[str, Any] = {
         "session_id": session_id,
         "public_key": public_key,
         "questions": questions,
@@ -91,9 +129,9 @@ def build_published_results(
             "ppe_type": ppe_type,
         },
         "responses": responses,
-        "certification_graph": {
-            "nodes": list(node_ids),
-            "edges": edges,
-        },
+        "certification_graph": cert_graph,
         "published_at": timestamp,
     }
+    if public_keys is not None:
+        results["public_keys"] = public_keys
+    return results

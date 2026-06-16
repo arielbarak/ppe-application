@@ -12,6 +12,7 @@ from tests.fixtures import (
     build_small_poll_payload,
     complete_certification_for_all,
     register_n_nodes,
+    signed_vote_payload,
 )
 
 
@@ -34,9 +35,10 @@ def test_full_six_phase_flow_m4_p_high(client, responder_keypairs, app_storage):
     transition = client.post(f"/api/poll/{sid}/status", json={"new_status": "certification"})
     assert transition.status_code == 200
 
-    # Phase 3: Certification -- seed all ideal edges as verified
+    # Phase 3: Certification -- seed all ideal edges as verified (real signatures)
+    keypairs = responder_keypairs[:4]
     edges_seeded = complete_certification_for_all(
-        app_storage, sid, node_ids, edge_probability=1.0
+        app_storage, sid, node_ids, edge_probability=1.0, keypairs=keypairs
     )
     assert edges_seeded == 12  # K4: 4 nodes * 3 neighbors
 
@@ -49,14 +51,12 @@ def test_full_six_phase_flow_m4_p_high(client, responder_keypairs, app_storage):
     voting_resp = client.post(f"/api/poll/{sid}/status", json={"new_status": "voting"})
     assert voting_resp.status_code == 200
 
-    # Phase 4: Response -- every node votes opt0 on q1, opt0 on q2
-    for nid in node_ids:
-        vote_resp = client.post(f"/api/poll/{sid}/vote", json={
-            "node_id": nid,
-            "vote": {"q1": "opt0", "q2": "opt0"},
-            "signatures": [],
-            "signature": "self-sig",
-        })
+    # Phase 4: Response -- every node votes opt0 on q1, opt0 on q2 (real signatures)
+    for kp in keypairs:
+        vote_resp = client.post(
+            f"/api/poll/{sid}/vote",
+            json=signed_vote_payload(kp, {"q1": "opt0", "q2": "opt0"}),
+        )
         assert vote_resp.status_code == 200
 
     # Phase 5: Results -- pollster publishes the bulletin
