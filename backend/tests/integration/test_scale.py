@@ -25,6 +25,7 @@ from tests.fixtures import (
     complete_certification_for_all,
     make_keypair,
     register_n_nodes,
+    signed_vote_payload,
 )
 
 
@@ -38,16 +39,11 @@ N_VOTE_OPT0 = 30
 N_VOTE_OPT1 = N_USERS - N_VOTE_OPT0
 
 
-def _vote_for_index(node_id: str, idx: int) -> dict:
+def _vote_for_index(idx: int) -> dict:
     """First N_VOTE_OPT0 voters pick opt0 on q1; the rest pick opt1. q2 always opt0."""
     return {
-        "node_id": node_id,
-        "vote": {
-            "q1": "opt0" if idx < N_VOTE_OPT0 else "opt1",
-            "q2": "opt0",
-        },
-        "signatures": [],
-        "signature": f"self-sig-{idx}",
+        "q1": "opt0" if idx < N_VOTE_OPT0 else "opt1",
+        "q2": "opt0",
     }
 
 
@@ -82,7 +78,8 @@ def test_full_flow_at_scale_with_50_users(client, app_storage):
 
     # Phase 3: Certification. Seed every ideal edge as verified.
     edges_seeded = complete_certification_for_all(
-        app_storage, sid, node_ids, edge_probability=params.edge_probability
+        app_storage, sid, node_ids, edge_probability=params.edge_probability,
+        keypairs=keypairs,
     )
     expected_directed_edges = sum(
         len(determine_neighbors(nid, node_ids, params.edge_probability)) for nid in node_ids
@@ -98,8 +95,11 @@ def test_full_flow_at_scale_with_50_users(client, app_storage):
     assert voting_resp.status_code == 200
 
     # Phase 4: Response. 30 vote opt0 on q1, 20 vote opt1. All vote opt0 on q2.
-    for idx, nid in enumerate(node_ids):
-        vote_resp = client.post(f"/api/poll/{sid}/vote", json=_vote_for_index(nid, idx))
+    for idx, kp in enumerate(keypairs):
+        vote_resp = client.post(
+            f"/api/poll/{sid}/vote",
+            json=signed_vote_payload(kp, _vote_for_index(idx)),
+        )
         assert vote_resp.status_code == 200, vote_resp.text
 
     # Phase 5: Results.

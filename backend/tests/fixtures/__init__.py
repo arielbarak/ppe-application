@@ -6,6 +6,7 @@ from .poll_factory import (
     build_small_poll_payload,
     complete_certification_for_all,
     register_n_nodes,
+    signed_vote_payload,
     solve_math_captcha,
 )
 from .published_results import build_published_results
@@ -19,5 +20,6 @@ __all__ = [
     "make_rsa_pubkey_b64",
     "register_n_nodes",
     "sign_b64",
+    "signed_vote_payload",
     "solve_math_captcha",
 ]

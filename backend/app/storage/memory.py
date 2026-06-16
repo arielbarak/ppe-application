@@ -315,6 +315,13 @@ class InMemoryStorage:
             if not session:
                 return None
 
+            # Map each node to its registered public key (pseudonym) so any
+            # third party can verify the edge and vote signatures below without
+            # contacting the pollster.
+            public_keys = {
+                node.node_id: node.pseudonym for node in session.registered_nodes
+            }
+
             results = {
                 'session_id': session_id,
                 'public_key': session.public_key,
@@ -325,9 +332,11 @@ class InMemoryStorage:
                     'validity_threshold': session.validity_threshold,
                     'ppe_type': session.ppe_type
                 },
+                'public_keys': public_keys,
                 'responses': [
                     {
                         'node_id': vote.node_id,
+                        'public_key': public_keys.get(vote.node_id),
                         'vote': vote.vote,
                         'signatures': vote.signatures,
                         'self_signature': vote.self_signature,
@@ -337,6 +346,7 @@ class InMemoryStorage:
                 ],
                 'certification_graph': {
                     'nodes': [node.node_id for node in session.registered_nodes],
+                    'public_keys': public_keys,
                     'edges': [
                         {
                             'from': edge.from_node,

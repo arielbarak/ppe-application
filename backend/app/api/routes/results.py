@@ -26,11 +26,13 @@ async def publish_results(
     session = get_session_or_404(session_id)
     require_status(session, "voting", "publish results")
 
-    # Pollster identity check: if the caller supplies their key, it must match
-    # the one stored on the session. We don't yet require the header (legacy
-    # clients call without it), but mismatches are rejected outright.
+    # App-level access guard, NOT a security property. The session public key
+    # is published in the bulletin, so anyone can supply it; this only catches
+    # accidental cross-session calls, not a malicious caller. Real pollster
+    # authentication would require a signature over the request under the
+    # pollster's private key. The header is optional for legacy clients.
     if x_pollster_key is None:
-        logger.warning("Publishing without pollster key verification")
+        logger.warning("Publishing without pollster key check (header omitted)")
     elif x_pollster_key != session.public_key:
         logger.warning(
             f"Pollster key mismatch on publish for session {session_id}"

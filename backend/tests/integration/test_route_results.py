@@ -4,16 +4,8 @@ from tests.fixtures import (
     build_small_poll_payload,
     complete_certification_for_all,
     register_n_nodes,
+    signed_vote_payload,
 )
-
-
-def _vote_payload(node_id):
-    return {
-        "node_id": node_id,
-        "vote": {"q1": "opt0", "q2": "opt0"},
-        "signatures": [],
-        "signature": "self-sig",
-    }
 
 
 def _walk_to_results(client, responder_keypairs, app_storage, n=4, p=1.0):
@@ -25,11 +17,17 @@ def _walk_to_results(client, responder_keypairs, app_storage, n=4, p=1.0):
     )
     sid = client.post("/api/poll/create", json=payload).json()["session_id"]
     node_ids = register_n_nodes(client, sid, n, responder_keypairs)
+    keypairs = responder_keypairs[:n]
     app_storage.update_session_status(sid, "certification")
-    complete_certification_for_all(app_storage, sid, node_ids, edge_probability=p)
+    complete_certification_for_all(
+        app_storage, sid, node_ids, edge_probability=p, keypairs=keypairs
+    )
     app_storage.update_session_status(sid, "voting")
-    for nid in node_ids:
-        client.post(f"/api/poll/{sid}/vote", json=_vote_payload(nid))
+    for kp in keypairs:
+        client.post(
+            f"/api/poll/{sid}/vote",
+            json=signed_vote_payload(kp, {"q1": "opt0", "q2": "opt0"}),
+        )
     client.post(f"/api/poll/{sid}/publish")
     return sid, node_ids
 

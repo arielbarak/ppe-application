@@ -7,7 +7,7 @@ from .params import (
     SecurityParams,
     compute_security_params,
     compute_adversary_advantage,
-    compute_validity_threshold_from_advantage,
+    min_degree_for_soundness,
     recommend_params_for_poll,
     validate_params,
 )
@@ -22,7 +22,7 @@ __all__ = [
     "SecurityParams",
     "compute_security_params",
     "compute_adversary_advantage",
-    "compute_validity_threshold_from_advantage",
+    "min_degree_for_soundness",
     "recommend_params_for_poll",
     "validate_params",
 ]

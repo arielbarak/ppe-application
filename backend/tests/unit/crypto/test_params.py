@@ -1,4 +1,4 @@
-"""Unit tests for app.crypto.params (Theorem 4.4 compliance)."""
+"""Unit tests for app.crypto.params (real Theorem 4.4 / Appendix C compliance)."""
 
 import math
 
@@ -7,82 +7,99 @@ import pytest
 from app.crypto.params import (
     SecurityParams,
     compute_adversary_advantage,
-    compute_edge_probability,
-    compute_expected_degree,
+    compute_free_nodes,
     compute_security_params,
-    compute_validity_threshold_from_advantage,
+    eta_v_min_completeness,
+    min_degree_for_soundness,
     recommend_params_for_poll,
+    soundness_precondition_holds,
     validate_params,
 )
 
 
-# compute_adversary_advantage / compute_validity_threshold_from_advantage
+# ---------------------------------------------------------------------------
+# Theorem 4.4 C* — anchored to the paper's Table 4 (Scenarios 1 and 2)
+# ---------------------------------------------------------------------------
+
+def test_c_star_matches_paper_table4_scenario1():
+    """Scenario 1: m=5000, d=60, eta_V=0.025, eta_E=1/8 -> C* ~ 200."""
+    c_star = compute_adversary_advantage(d=60, eta_v=0.025, eta_e=0.125, m=5000)
+    assert c_star == pytest.approx(200, rel=0.02)
 
 
-def test_compute_adversary_advantage_eta_v_zero_is_one():
-    assert compute_adversary_advantage(0.0) == 1.0
+def test_c_star_matches_paper_table4_scenario2():
+    """Scenario 2: doubling the degree to d=120 drops C* to ~10."""
+    c_star = compute_adversary_advantage(d=120, eta_v=0.025, eta_e=0.125, m=5000)
+    assert c_star == pytest.approx(10, rel=0.05)
 
 
-def test_compute_adversary_advantage_eta_v_one_is_inf():
-    assert math.isinf(compute_adversary_advantage(1.0))
+def test_c_star_decreases_with_degree():
+    """Higher degree (more PPEs per responder) yields a smaller advantage."""
+    low_d = compute_adversary_advantage(d=60, eta_v=0.025, eta_e=0.125, m=5000)
+    high_d = compute_adversary_advantage(d=120, eta_v=0.025, eta_e=0.125, m=5000)
+    assert high_d < low_d
 
 
-def test_compute_adversary_advantage_formula():
-    eta_v = 0.025
-    expected = (1 + eta_v) / (1 - eta_v)
-    assert compute_adversary_advantage(eta_v) == pytest.approx(expected, rel=1e-12)
+def test_c_star_unbounded_below_soundness_minimum():
+    """Below the soundness-minimum degree the precondition fails and C* is +inf."""
+    d_min = min_degree_for_soundness(eta_v=0.025, eta_e=0.125, m=5000)
+    c_star = compute_adversary_advantage(d=d_min * 0.5, eta_v=0.025, eta_e=0.125, m=5000)
+    assert math.isinf(c_star)
 
 
-def test_validity_threshold_from_advantage_below_one_is_zero():
-    assert compute_validity_threshold_from_advantage(0.5) == 0.0
-    assert compute_validity_threshold_from_advantage(1.0) == 0.0
+def test_c_star_infeasible_when_half_minus_thresholds_nonpositive():
+    """If 1/2 - eta_V - eta_E <= 0 the bound cannot hold."""
+    assert math.isinf(min_degree_for_soundness(eta_v=0.3, eta_e=0.25, m=1000))
 
 
-@pytest.mark.parametrize("c_star", [1.05, 1.1, 1.25, 1.5])
-def test_advantage_threshold_round_trip(c_star):
-    eta_v = compute_validity_threshold_from_advantage(c_star)
-    assert compute_adversary_advantage(eta_v) == pytest.approx(c_star, rel=1e-9)
+# ---------------------------------------------------------------------------
+# Soundness precondition / minimum degree (Appendix C.1 constraint 1)
+# ---------------------------------------------------------------------------
+
+def test_min_degree_matches_paper_scenario1():
+    """d_min for Scenario 1 is ~58.3 (paper rounds the chosen degree up to 60)."""
+    d_min = min_degree_for_soundness(eta_v=0.025, eta_e=0.125, m=5000)
+    assert d_min == pytest.approx(58.3, abs=0.5)
 
 
-# compute_expected_degree / compute_edge_probability
+def test_precondition_holds_above_minimum_and_fails_below():
+    d_min = min_degree_for_soundness(eta_v=0.025, eta_e=0.125, m=5000)
+    assert soundness_precondition_holds(d_min * 1.1, 0.025, 0.125, 5000)
+    assert not soundness_precondition_holds(d_min * 0.9, 0.025, 0.125, 5000)
 
 
-def test_compute_expected_degree_grows_with_kappa():
-    base = compute_expected_degree(m=100, kappa=40)
-    higher = compute_expected_degree(m=100, kappa=128)
-    assert higher > base
+# ---------------------------------------------------------------------------
+# Theorem 5.2 completeness lower bound — anchored to Table 4
+# ---------------------------------------------------------------------------
+
+def test_eta_v_min_matches_paper_scenario1():
+    """Scenario 1's eta_V=0.025 is exactly the completeness minimum."""
+    v_min = eta_v_min_completeness(
+        kappa=40, m=5000, d=60, sigma=0.0, theta=1e-3, eta_e=0.125
+    )
+    assert v_min == pytest.approx(0.025, abs=1e-4)
 
 
-def test_compute_expected_degree_grows_with_m():
-    smaller = compute_expected_degree(m=10, kappa=80)
-    larger = compute_expected_degree(m=1000, kappa=80)
-    assert larger > smaller
+def test_eta_v_min_matches_paper_scenario3():
+    """Scenario 3 (noisy PPE): completeness minimum ~0.0275, within paper's 0.028."""
+    v_min = eta_v_min_completeness(
+        kappa=40, m=100000, d=165, sigma=1e-3, theta=1e-4, eta_e=0.23
+    )
+    assert v_min == pytest.approx(0.0275, abs=5e-4)
+    assert v_min <= 0.028
 
 
-def test_compute_expected_degree_m_le_one_returns_zero():
-    assert compute_expected_degree(m=1, kappa=80) == 0.0
-    assert compute_expected_degree(m=0, kappa=80) == 0.0
+# ---------------------------------------------------------------------------
+# free nodes K (Theorem 4.4)
+# ---------------------------------------------------------------------------
+
+def test_free_nodes_grows_with_kappa():
+    assert compute_free_nodes(128, 1000, 0.025) > compute_free_nodes(40, 1000, 0.025)
 
 
-def test_compute_expected_degree_formula():
-    """d = 2*ln(m) + kappa/16."""
-    m, kappa = 100, 80
-    expected = 2 * math.log(m) + kappa / 16
-    assert compute_expected_degree(m, kappa) == pytest.approx(expected, rel=1e-12)
-
-
-def test_compute_edge_probability_clamped_to_unit_interval():
-    assert compute_edge_probability(expected_degree=999.0, m=10) == 1.0
-    assert compute_edge_probability(expected_degree=-5.0, m=10) == 0.0
-    assert compute_edge_probability(expected_degree=4.5, m=10) == pytest.approx(0.5)
-
-
-def test_compute_edge_probability_m_le_one_returns_zero():
-    assert compute_edge_probability(expected_degree=5.0, m=1) == 0.0
-
-
+# ---------------------------------------------------------------------------
 # compute_security_params
-
+# ---------------------------------------------------------------------------
 
 def test_compute_security_params_invalid_kappa_raises():
     with pytest.raises(ValueError):
@@ -95,57 +112,51 @@ def test_compute_security_params_invalid_m_raises():
 
 
 def test_compute_security_params_returns_dataclass():
-    params = compute_security_params(kappa=80, m=100)
+    params = compute_security_params(kappa=80, m=5000)
     assert isinstance(params, SecurityParams)
     assert params.kappa == 80
-    assert params.m == 100
-
-
-def test_compute_security_params_thresholds_in_clamped_ranges():
-    """η_E clamped to [0.1, 0.5]; η_V clamped to [0.005, 0.1]."""
-    params = compute_security_params(kappa=80, m=100)
-    assert 0.1 <= params.effort_threshold <= 0.5
-    assert 0.005 <= params.validity_threshold <= 0.1
+    assert params.m == 5000
 
 
 def test_compute_security_params_p_consistent_with_d_and_m():
-    """p * (m-1) ≈ expected_degree."""
-    params = compute_security_params(kappa=80, m=100)
+    """p * (m-1) == expected_degree by construction (p = d/(m-1))."""
+    params = compute_security_params(kappa=80, m=5000)
     assert params.edge_probability * (params.m - 1) == pytest.approx(
         params.expected_degree, rel=1e-9
     )
 
 
-def test_compute_security_params_c_star_consistent_with_eta_v():
-    params = compute_security_params(kappa=80, m=100)
-    expected_c = (1 + params.validity_threshold) / (1 - params.validity_threshold)
-    assert params.adversary_advantage == pytest.approx(expected_c, rel=1e-9)
+def test_compute_security_params_meets_target_advantage_when_feasible():
+    """With a large enough poll, medium level should reach its C* target of 20."""
+    params = compute_security_params(
+        kappa=80, m=5000, honest_failure_rate=0.0, max_adversary_advantage=20.0
+    )
+    assert params.adversary_advantage <= 20.0 + 1e-6
+    assert params.soundness_precondition_ok
 
 
-@pytest.mark.parametrize(
-    "kappa, m, expected_d, expected_p",
-    [
-        (40, 10, 7.1, 0.79),     # README small example
-        (80, 100, 14.2, 0.14),   # README medium example
-        (128, 1000, 21.8, 0.022),  # README large example
-    ],
-)
-def test_compute_security_params_matches_readme_d_and_p(kappa, m, expected_d, expected_p):
-    """Lock the README example values for d and p (tolerance 0.05)."""
-    params = compute_security_params(kappa=kappa, m=m)
-    assert params.expected_degree == pytest.approx(expected_d, abs=0.1)
-    assert params.edge_probability == pytest.approx(expected_p, abs=0.01)
+def test_compute_security_params_degree_at_least_soundness_minimum():
+    params = compute_security_params(kappa=80, m=5000)
+    d_min = min_degree_for_soundness(
+        params.validity_threshold, params.effort_threshold, params.m
+    )
+    assert params.expected_degree >= d_min
 
 
+def test_compute_security_params_infeasible_thresholds_raise():
+    with pytest.raises(ValueError):
+        compute_security_params(
+            kappa=80, m=1000, effort_threshold=0.3, validity_threshold=0.25
+        )
+
+
+# ---------------------------------------------------------------------------
 # recommend_params_for_poll
+# ---------------------------------------------------------------------------
 
-
-@pytest.mark.parametrize(
-    "level, kappa",
-    [("low", 40), ("medium", 80), ("high", 128)],
-)
+@pytest.mark.parametrize("level, kappa", [("low", 40), ("medium", 80), ("high", 128)])
 def test_recommend_params_kappa_by_level(level, kappa):
-    params = recommend_params_for_poll(expected_responders=100, security_level=level)
+    params = recommend_params_for_poll(expected_responders=5000, security_level=level)
     assert params.kappa == kappa
 
 
@@ -154,47 +165,51 @@ def test_recommend_params_unknown_level_raises():
         recommend_params_for_poll(expected_responders=100, security_level="extreme")
 
 
-def test_recommend_params_high_security_has_lower_c_star_than_low():
-    low = recommend_params_for_poll(expected_responders=100, security_level="low")
-    high = recommend_params_for_poll(expected_responders=100, security_level="high")
-    # Higher security should bound adversary advantage more tightly
+def test_recommend_params_high_security_has_lower_or_equal_c_star_than_low():
+    low = recommend_params_for_poll(expected_responders=5000, security_level="low")
+    high = recommend_params_for_poll(expected_responders=5000, security_level="high")
     assert high.adversary_advantage <= low.adversary_advantage
 
 
+# ---------------------------------------------------------------------------
 # validate_params
-
+# ---------------------------------------------------------------------------
 
 def test_validate_params_clean_input_no_warnings():
+    """A degree above the soundness minimum with a modest C* validates cleanly."""
     result = validate_params(
-        m=100,
-        edge_probability=0.14,
-        effort_threshold=0.15,
+        m=5000,
+        edge_probability=120 / 4999,  # d ~ 120 -> C* ~ 10
+        effort_threshold=0.125,
         validity_threshold=0.025,
         kappa=80,
     )
     assert result["valid"] is True
-
-
-def test_validate_params_warns_on_high_c_star():
-    result = validate_params(
-        m=100,
-        edge_probability=0.5,
-        effort_threshold=0.3,
-        validity_threshold=0.5,  # huge η_V → C* >> 1.5
-        kappa=80,
-    )
-    assert any("adversary advantage" in w.lower() for w in result["warnings"])
+    assert result["warnings"] == []
 
 
 def test_validate_params_warns_on_low_degree():
     result = validate_params(
-        m=1000,
-        edge_probability=0.001,  # very sparse
-        effort_threshold=0.2,
+        m=5000,
+        edge_probability=0.001,  # d ~ 5, far below soundness minimum
+        effort_threshold=0.125,
         validity_threshold=0.025,
         kappa=80,
     )
-    assert any("degree" in w.lower() for w in result["warnings"])
+    assert result["valid"] is False
+    assert any("degree" in w.lower() or "unbounded" in w.lower() for w in result["warnings"])
+
+
+def test_validate_params_warns_when_thresholds_infeasible():
+    result = validate_params(
+        m=1000,
+        edge_probability=0.5,
+        effort_threshold=0.3,
+        validity_threshold=0.25,  # 1/2 - eta_V - eta_E = -0.05
+        kappa=80,
+    )
+    assert result["valid"] is False
+    assert any("1/2" in w or "unbounded" in w.lower() for w in result["warnings"])
 
 
 @pytest.mark.parametrize(
@@ -210,9 +225,9 @@ def test_validate_params_warns_on_low_degree():
 )
 def test_validate_params_marks_invalid_ranges(field, bad_value):
     base = {
-        "m": 100,
-        "edge_probability": 0.14,
-        "effort_threshold": 0.15,
+        "m": 5000,
+        "edge_probability": 120 / 4999,
+        "effort_threshold": 0.125,
         "validity_threshold": 0.025,
         "kappa": 80,
     }
