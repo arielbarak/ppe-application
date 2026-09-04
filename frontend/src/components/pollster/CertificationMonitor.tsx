@@ -427,7 +427,7 @@ export function CertificationMonitor({ sessionId, nodeId, onAdvance }: Certifica
       <div className="bg-purple-50 border border-purple-200 rounded p-3 text-sm">
         <p className="font-bold mb-1">🔐 Protocol 3 Status:</p>
         <ul className="text-purple-800 space-y-1 text-xs">
-          <li>✓ Neighbors computed using H(i,j) ≤ p (deterministic graph)</li>
+          <li>✓ Neighbors computed using H(seed, i, j) ≤ p over canonical indices (deterministic graph)</li>
           <li>✓ Symmetric PPE via WebSocket (challenge exchange)</li>
           <li>✓ Commitments → Solutions → Signatures</li>
           <li>

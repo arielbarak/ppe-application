@@ -9,36 +9,42 @@ import copy
 
 import pytest
 
-from app.crypto.graph import determine_neighbors
+from app.crypto.graph import determine_neighbors, edge_exists
 from app.crypto.verification import (
     GraphDiscrepancies,
     _build_published_edge_index,
     _check_edge_symmetry,
     _check_node_consistency,
-    _edge_should_exist,
     _reconcile_graph,
     _reconstruct_ideal_graph,
     verify_global,
     verify_local,
 )
 
-from tests.fixtures import STABLE_NODE_IDS, build_published_results, make_keypair
+from tests.fixtures import (
+    STABLE_NODE_IDS,
+    build_published_results,
+    graph_context_for,
+    make_keypair,
+)
 
 
 def _find_absent_pair(node_ids, p):
     """Return some (a, b) such that the ideal graph has no edge between them."""
+    ctx = graph_context_for(node_ids, p)
     for a in node_ids:
         for b in node_ids:
-            if a != b and not _edge_should_exist(a, b, p):
+            if a != b and not edge_exists(a, b, ctx):
                 return a, b
     raise RuntimeError("All pairs are edges - pick a smaller p")
 
 
 def _find_present_pair(node_ids, p):
     """Return some (a, b) such that the ideal graph has an edge between them."""
+    ctx = graph_context_for(node_ids, p)
     for a in node_ids:
         for b in node_ids:
-            if a != b and _edge_should_exist(a, b, p):
+            if a != b and edge_exists(a, b, ctx):
                 return a, b
     raise RuntimeError("No edges exist - pick a larger p")
 
@@ -49,16 +55,17 @@ def _find_present_pair(node_ids, p):
 def test_reconstruct_ideal_graph_matches_determine_neighbors():
     """Locks the cross-module invariant between verification.py and graph.py."""
     nodes = STABLE_NODE_IDS
-    ideal = _reconstruct_ideal_graph(nodes, edge_probability=0.5)
+    ctx = graph_context_for(nodes, 0.5)
+    ideal = _reconstruct_ideal_graph(ctx)
 
     for nid in nodes:
-        expected = set(determine_neighbors(nid, nodes, 0.5))
+        expected = set(determine_neighbors(nid, ctx))
         assert ideal[nid] == expected
 
 
 def test_reconstruct_ideal_graph_symmetric():
     nodes = STABLE_NODE_IDS
-    ideal = _reconstruct_ideal_graph(nodes, edge_probability=0.5)
+    ideal = _reconstruct_ideal_graph(graph_context_for(nodes, 0.5))
 
     for a in nodes:
         for b in ideal[a]:
@@ -66,13 +73,14 @@ def test_reconstruct_ideal_graph_symmetric():
 
 
 @pytest.mark.parametrize("p", [0.0, 0.25, 0.5, 0.75, 1.0])
-def test_edge_should_exist_min_max_invariant(p):
+def test_edge_exists_index_order_invariant(p):
     nodes = STABLE_NODE_IDS
+    ctx = graph_context_for(nodes, p)
     for a in nodes:
         for b in nodes:
             if a == b:
                 continue
-            assert _edge_should_exist(a, b, p) == _edge_should_exist(b, a, p)
+            assert edge_exists(a, b, ctx) == edge_exists(b, a, ctx)
 
 
 # index / consistency / symmetry helpers
@@ -116,7 +124,7 @@ def test_check_edge_symmetry_flags_one_directional():
 def test_reconcile_graph_perfect_match_no_discrepancies():
     nodes = STABLE_NODE_IDS[:4]
     p = 0.5
-    ideal = _reconstruct_ideal_graph(nodes, p)
+    ideal = _reconstruct_ideal_graph(graph_context_for(nodes, p))
     published = build_published_results(nodes, p)
     idx = _build_published_edge_index(published["certification_graph"])
 
@@ -131,7 +139,7 @@ def test_reconcile_graph_perfect_match_no_discrepancies():
 def test_reconcile_graph_omitted_edge_synthesized_as_failed():
     nodes = STABLE_NODE_IDS[:4]
     p = 0.5
-    ideal = _reconstruct_ideal_graph(nodes, p)
+    ideal = _reconstruct_ideal_graph(graph_context_for(nodes, p))
     a, b = _find_present_pair(nodes, p)
 
     published = build_published_results(nodes, p, drop_edges={(a, b)})
@@ -150,7 +158,7 @@ def test_reconcile_graph_omitted_edge_synthesized_as_failed():
 def test_reconcile_graph_fabricated_edge_detected():
     nodes = STABLE_NODE_IDS[:4]
     p = 0.5
-    ideal = _reconstruct_ideal_graph(nodes, p)
+    ideal = _reconstruct_ideal_graph(graph_context_for(nodes, p))
     a, b = _find_absent_pair(nodes, p)
 
     published = build_published_results(nodes, p, extra_edges=[(a, b)])
@@ -163,7 +171,7 @@ def test_reconcile_graph_fabricated_edge_detected():
 def test_reconcile_graph_missing_node_in_response():
     nodes = STABLE_NODE_IDS[:4]
     p = 0.5
-    ideal = _reconstruct_ideal_graph(nodes, p)
+    ideal = _reconstruct_ideal_graph(graph_context_for(nodes, p))
     published = build_published_results(nodes, p)
     idx = _build_published_edge_index(published["certification_graph"])
 
@@ -416,10 +424,11 @@ def test_verify_local_fabricated_wins_over_omitted():
     pub = build_published_results(nodes, p)
 
     # Find a non-edge from nodes[0] and inject a fabricated outgoing edge
+    ctx = graph_context_for(nodes, p)
     a = nodes[0]
     target = next(
         n for n in nodes
-        if n != a and not _edge_should_exist(a, n, p)
+        if n != a and not edge_exists(a, n, ctx)
     )
     pub["certification_graph"]["edges"].append({
         "from": a, "to": target, "verified": True,
@@ -429,7 +438,7 @@ def test_verify_local_fabricated_wins_over_omitted():
     # Also drop a real edge so both fabricated and omitted exist
     real_neighbor = next(
         n for n in nodes
-        if n != a and _edge_should_exist(a, n, p)
+        if n != a and edge_exists(a, n, ctx)
     )
     pub["certification_graph"]["edges"] = [
         e for e in pub["certification_graph"]["edges"]
@@ -567,12 +576,10 @@ def test_global_rejects_substituted_public_key():
 
     out = verify_global(results, eta_e=0.5, eta_v=0.5)
 
-    # The substituted key does not hash to the victim's id, so it cannot be
-    # trusted: the victim's edges fail signature checks (-> exclusion via eta_E)
-    # and/or its ballot is dropped. Either path keeps the forged vote out.
-    caught = (
-        victim in out["details"].get("invalid_vote_signatures", [])
-        or victim in out.get("excluded_nodes", [])
-    )
-    assert caught
-    assert out["details"]["invalid_signature_edge_count"] >= 1
+    # The substituted key does not hash to the victim's id. Since index
+    # assignment depends on that binding, the whole bulletin is now
+    # unreconstructable and verification stops before any tally -- the forged
+    # vote never gets counted.
+    assert out["verification"] == "REJECT"
+    assert "does not hash to its node id" in out["details"]["message"]
+    assert out["tally"] == {}

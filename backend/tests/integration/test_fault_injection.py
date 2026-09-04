@@ -4,7 +4,11 @@ could try to manipulate published results, and asserts that Protocol 6
 verification catches it.
 """
 
-from app.crypto.verification import _edge_should_exist
+from app.crypto.graph import (
+    build_graph_context,
+    compute_participant_digest,
+    edge_exists,
+)
 
 from tests.fixtures import (
     build_small_poll_payload,
@@ -61,9 +65,10 @@ def test_pollster_fabricates_absent_edge_at_p_half_rejects(
         p=0.5, effort_threshold=0.5,
     )
 
+    ctx = app_storage.get_graph_context(sid)
     absent_pair = next(
         ((a, b) for a in node_ids for b in node_ids
-         if a != b and not _edge_should_exist(a, b, 0.5)),
+         if a != b and not edge_exists(a, b, ctx)),
         None,
     )
     assert absent_pair is not None, "Expected at least one ideal-absent edge at p=0.5"
@@ -85,7 +90,12 @@ def test_pollster_fabricates_absent_edge_at_p_half_rejects(
 def test_pollster_drops_voter_from_node_list_rejects(
     client, responder_keypairs, app_storage
 ):
-    """A voter whose node_id is missing from cert_graph['nodes'] is a critical issue."""
+    """Dropping a voter from cert_graph['nodes'] breaks the published graph binding.
+
+    Indices are ranks within the participant set, so removing a node shifts them.
+    The published node_indices no longer match what a verifier derives, and the
+    bulletin is rejected before any tally.
+    """
     sid, node_ids = _walk_to_published(client, responder_keypairs, app_storage)
 
     sess = app_storage.get_session(sid)
@@ -94,6 +104,40 @@ def test_pollster_drops_voter_from_node_list_rejects(
         n for n in sess.published_results["certification_graph"]["nodes"]
         if n != node_ids[0]
     ]
+
+    body = client.post(f"/api/poll/{sid}/verify", json={"mode": "global"}).json()
+    assert body["verification"] == "REJECT"
+    assert "Graph binding invalid" in body["details"]["message"]
+
+
+def test_pollster_drops_voter_and_rebuilds_binding_rejects(
+    client, responder_keypairs, app_storage
+):
+    """The same attack, but with the binding recomputed so it is self-consistent.
+
+    The commitment only pins the nonce, so a pollster *can* rederive a valid
+    seed for a smaller participant set. What it cannot do is hide that a node
+    which submitted a ballot is absent from the graph.
+    """
+    sid, node_ids = _walk_to_published(client, responder_keypairs, app_storage)
+
+    sess = app_storage.get_session(sid)
+    pub = sess.published_results
+    victim = node_ids[0]
+
+    remaining = [n for n in pub["certification_graph"]["nodes"] if n != victim]
+    keys = {nid: k for nid, k in pub["public_keys"].items() if nid != victim}
+    nonce = pub["graph_binding"]["seed_nonce"]
+    ctx = build_graph_context(nonce, keys, pub["parameters"]["edge_probability"])
+
+    pub["certification_graph"]["nodes"] = remaining
+    pub["certification_graph"]["public_keys"] = keys
+    pub["public_keys"] = keys
+    pub["graph_binding"].update({
+        "participant_digest": compute_participant_digest(keys.values()),
+        "graph_seed": ctx.seed,
+        "node_indices": dict(ctx.indices),
+    })
 
     body = client.post(f"/api/poll/{sid}/verify", json={"mode": "global"}).json()
     assert body["verification"] == "REJECT"

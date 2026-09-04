@@ -35,7 +35,7 @@ def test_neighbors_returns_deterministic_set(client, responder_keypairs, app_sto
         client, responder_keypairs, app_storage, n=4, p=0.5
     )
     me = node_ids[0]
-    expected = sorted(determine_neighbors(me, node_ids, 0.5))
+    expected = sorted(determine_neighbors(me, app_storage.get_graph_context(sid)))
 
     resp = client.get(f"/api/poll/{sid}/neighbors", headers={"X-Node-ID": me})
     assert resp.status_code == 200

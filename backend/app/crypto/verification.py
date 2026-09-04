@@ -18,19 +18,25 @@ Only after this reconciliation are exclusions (η_E) and validity (η_V)
 computed against the full, independently-verified graph.
 """
 
-import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Set, Tuple, Optional
 
-from .graph import compute_exclusions, validate_certification_graph, determine_neighbors, compute_node_id
+from .graph import (
+    GraphContext,
+    build_graph_context,
+    build_ideal_graph,
+    compute_exclusions,
+    compute_node_id,
+    determine_neighbors,
+    edge_exists,
+    validate_certification_graph,
+    verify_seed_commitment,
+)
 from .signatures import verify_signature
 
 logger = logging.getLogger(__name__)
-
-# Maximum value of a 256-bit SHA-256 hash (64 hex chars of 'f')
-_MAX_HASH = int('f' * 64, 16)
 
 
 def _canonical_vote_message(vote: Dict[str, Any]) -> str:
@@ -169,23 +175,84 @@ class GraphDiscrepancies:
         )
 
 
-def _compute_edge_hash(node_a: str, node_b: str) -> int:
-    """Compute deterministic edge hash using SHA-256(min:max) ordering."""
-    edge_key = f"{min(node_a, node_b)}:{max(node_a, node_b)}"
-    return int(hashlib.sha256(edge_key.encode('utf-8')).hexdigest(), 16)
+class GraphBindingError(ValueError):
+    """The bulletin does not pin down a graph the verifier can reproduce."""
 
 
-def _edge_should_exist(node_a: str, node_b: str, edge_probability: float) -> bool:
-    """Determine if an edge should exist based on the SHA-256 hash threshold."""
-    threshold = int(_MAX_HASH * edge_probability)
-    edge_hash = _compute_edge_hash(node_a, node_b)
-    return edge_hash <= threshold
+def _graph_context_from_bulletin(published_results: Dict[str, Any]) -> GraphContext:
+    """Rebuild the session's graph context from the bulletin, trusting nothing.
+
+    The verifier derives the seed itself from the revealed nonce and the
+    published keys, and only then checks that what the pollster published
+    matches. Taking the pollster's graph_seed at face value would hand back
+    exactly the freedom the commitment exists to remove.
+    """
+    cert_graph_data = published_results.get('certification_graph', {})
+    parameters = published_results.get('parameters', {})
+    binding = published_results.get('graph_binding') or {}
+
+    public_keys = (
+        published_results.get('public_keys')
+        or cert_graph_data.get('public_keys')
+        or {}
+    )
+    if not public_keys:
+        raise GraphBindingError(
+            "Bulletin publishes no public keys, so the certification graph "
+            "cannot be independently reconstructed"
+        )
+
+    seed_nonce = binding.get('seed_nonce')
+    seed_commitment = binding.get('seed_commitment')
+    if not seed_nonce or not seed_commitment:
+        raise GraphBindingError(
+            "Bulletin is missing the graph seed commitment or its opening"
+        )
+
+    if not verify_seed_commitment(seed_nonce, seed_commitment):
+        raise GraphBindingError(
+            "Revealed seed nonce does not open the published commitment"
+        )
+
+    # Restrict to the published node list: a key for a node that is not in the
+    # graph would shift every index.
+    all_node_ids = cert_graph_data.get('nodes', [])
+    scoped_keys = {nid: public_keys[nid] for nid in all_node_ids if nid in public_keys}
+    missing = [nid for nid in all_node_ids if nid not in public_keys]
+    if missing:
+        raise GraphBindingError(
+            f"Bulletin omits public keys for {len(missing)} node(s), so indices "
+            f"cannot be assigned: {missing[:3]}"
+        )
+
+    try:
+        ctx = build_graph_context(
+            seed_nonce=seed_nonce,
+            public_keys=scoped_keys,
+            probability=parameters.get('edge_probability', 0.5),
+        )
+    except ValueError as exc:
+        raise GraphBindingError(str(exc)) from exc
+
+    # The pollster may publish its own view of the derived values; if it does,
+    # they must agree with ours, or it ran a different graph than it committed to.
+    claimed_seed = binding.get('graph_seed')
+    if claimed_seed and claimed_seed != ctx.seed:
+        raise GraphBindingError(
+            "Published graph seed does not match the seed derived from the "
+            "revealed nonce and the published keys"
+        )
+
+    claimed_indices = binding.get('node_indices')
+    if claimed_indices and dict(claimed_indices) != dict(ctx.indices):
+        raise GraphBindingError(
+            "Published node indices do not match the canonical assignment"
+        )
+
+    return ctx
 
 
-def _reconstruct_ideal_graph(
-    all_node_ids: List[str],
-    edge_probability: float,
-) -> Dict[str, Set[str]]:
+def _reconstruct_ideal_graph(ctx: GraphContext) -> Dict[str, Set[str]]:
     """
     Recompute the Ideal Graph G_c from public parameters alone.
     This is the mathematical truth of the session — independent of anything
@@ -193,13 +260,7 @@ def _reconstruct_ideal_graph(
 
     The graph is symmetric: if edge(A,B) exists, both A→B and B→A are present.
     """
-    ideal: Dict[str, Set[str]] = {nid: set() for nid in all_node_ids}
-
-    for node_id in all_node_ids:
-        neighbors = determine_neighbors(node_id, all_node_ids, edge_probability)
-        ideal[node_id] = set(neighbors)
-
-    return ideal
+    return build_ideal_graph(ctx)
 
 
 def _build_published_edge_index(
@@ -359,6 +420,8 @@ def verify_local(
         'unverified_edges': 0,
         'self_signature_valid': None,
         'invalid_signature_edges': [],
+        'node_index': None,
+        'graph_seed': None,
     }
 
     try:
@@ -376,14 +439,20 @@ def verify_local(
         details['vote_found'] = True
 
         cert_graph = published_results.get('certification_graph', {})
-        parameters = published_results.get('parameters', {})
         all_node_ids = cert_graph.get('nodes', [])
-        edge_probability = parameters.get('edge_probability', 0.5)
         public_keys = (
             published_results.get('public_keys')
             or cert_graph.get('public_keys')
             or {}
         )
+
+        try:
+            ctx = _graph_context_from_bulletin(published_results)
+        except GraphBindingError as exc:
+            return False, f"Local verification FAILED: {exc}", details
+
+        details['node_index'] = ctx.indices.get(node_id)
+        details['graph_seed'] = ctx.seed
 
         if node_id not in all_node_ids:
             return False, f"Node {node_id} not in published node list", details
@@ -399,11 +468,8 @@ def verify_local(
                 f"does not carry a valid self-signature"
             ), details
 
-        # Reconstruct expected neighbors using SHA-256 hash logic
-        expected_neighbors = set()
-        for other_id in all_node_ids:
-            if other_id != node_id and _edge_should_exist(node_id, other_id, edge_probability):
-                expected_neighbors.add(other_id)
+        # Reconstruct expected neighbors from the independently derived context
+        expected_neighbors = set(determine_neighbors(node_id, ctx))
 
         details['expected_neighbors'] = len(expected_neighbors)
 
@@ -484,13 +550,14 @@ def verify_global(
 ) -> Dict[str, Any]:
     """
     Full independent verification (Protocol 6). Reconstructs the ideal graph
-    from scratch using SHA-256 hash logic, reconciles it against the published
-    data, runs η_E exclusion and η_V validity, then tallies votes from
-    non-excluded nodes only.
+    from scratch, reconciles it against the published data, runs η_E exclusion
+    and η_V validity, then tallies votes from non-excluded nodes only.
 
     The verification process:
-    1. Extract all node IDs and edge probability from published data
-    2. Reconstruct the Ideal Graph G_c using SHA-256(min(i,j):max(i,j)) <= p * MAX_HASH
+    1. Rederive the graph binding: check the revealed nonce opens the Protocol 1
+       commitment, recompute the seed from it and the published keys, and assign
+       canonical indices. A bulletin that fails here is REJECTed outright.
+    2. Reconstruct the Ideal Graph G_c using SHA-256(seed:min(i,j):max(i,j)) <= p * MAX_HASH
     3. Cross-reference published edges against the ideal graph
     4. Detect omitted edges (in ideal but not published) - treated as failures
     5. Detect fabricated edges (in published but not ideal) - immediate REJECT
@@ -524,6 +591,14 @@ def verify_global(
         if not all_node_ids:
             return _error_result("No nodes in published certification graph")
 
+        # Derive the graph binding before anything else: without a seed we can
+        # reproduce, every downstream check would be measuring the pollster's
+        # graph against itself.
+        try:
+            ctx = _graph_context_from_bulletin(published_results)
+        except GraphBindingError as exc:
+            return _error_result(f"Graph binding invalid: {exc}")
+
         # Get set of nodes that actually submitted votes
         response_node_ids = {r.get('node_id') for r in responses if r.get('node_id')}
 
@@ -533,7 +608,7 @@ def verify_global(
         )
 
         # Step 1: Reconstruct the Ideal Graph from public parameters
-        ideal_graph = _reconstruct_ideal_graph(all_node_ids, edge_probability)
+        ideal_graph = _reconstruct_ideal_graph(ctx)
         ideal_edge_count = sum(len(nbrs) for nbrs in ideal_graph.values())
 
         logger.info(

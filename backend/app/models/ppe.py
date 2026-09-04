@@ -47,11 +47,18 @@ class EdgeData(BaseModel):
 
 
 class ResultsResponse(BaseModel):
-    """Published poll results (Protocol 5)"""
+    """Published poll results (Protocol 5).
+
+    Everything here is what a third party needs to run Protocol 6 without
+    contacting the pollster, so any field the verifier reads must be declared:
+    undeclared keys are dropped on the way out.
+    """
     session_id: str
     public_key: str
     questions: List[Dict[str, Any]]
     parameters: Dict[str, Any]  # Contains floats (thresholds) and strings (ppe_type)
+    public_keys: Dict[str, str]  # node_id -> public key; indices are derived from these
+    graph_binding: Dict[str, Any]  # seed commitment + the nonce that opens it
     responses: List[Dict[str, Any]]
     certification_graph: Dict[str, Any]
     published_at: str

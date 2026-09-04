@@ -150,6 +150,12 @@ def test_node_certification_endpoint(client, responder_keypairs, app_storage):
     sid = client.post("/api/poll/create", json=payload).json()["session_id"]
     node_ids = register_n_nodes(client, sid, 2, responder_keypairs)
 
+    # The graph does not exist until registration closes and the seed is fixed
+    too_early = client.get(f"/api/poll/{sid}/node/{node_ids[0]}/certification")
+    assert too_early.status_code == 400
+
+    app_storage.update_session_status(sid, "certification")
+
     # Without edges -> not certified
     not_yet = client.get(f"/api/poll/{sid}/node/{node_ids[0]}/certification")
     assert not_yet.status_code == 200

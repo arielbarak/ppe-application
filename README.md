@@ -60,6 +60,7 @@ Useful filters:
 pytest -k verify_global -v                                     # focus on a name
 pytest tests/integration/test_full_protocol_flow.py -v         # walk the 6-phase flow
 pytest tests/integration/test_fault_injection.py -v            # hostile-pollster scenarios
+pytest tests/unit/crypto/test_graph_binding.py -v              # graph is unsteerable
 ```
 
 ### Scale test
@@ -85,11 +86,11 @@ Peer A  ──── [opaque PPE payload] ────►  Server  ────�
 
 ### 6-Phase Protocol
 
-Phase 1 - Announcement: Pollster creates a session with questions, edge probability p, and thresholds eta_E / eta_V.
+Phase 1 - Announcement: Pollster creates a session with questions, edge probability p, thresholds eta_E / eta_V, and a commitment to the graph seed.
 
-Phase 2 - Registration: Responders solve a CAPTCHA and register their public key.
+Phase 2 - Registration: Responders solve a CAPTCHA and register their public key. Closing registration freezes the participant set, reveals the seed nonce, and fixes the certification graph.
 
-Phase 3 - Certification: Peers perform symmetric PPE challenges with their hash-determined neighbors.
+Phase 3 - Certification: Peers perform symmetric PPE challenges with their seed-determined neighbors.
 
 Phase 4 - Response: Certified responders submit encrypted votes with collected peer signatures.
 
@@ -99,13 +100,24 @@ Phase 6 - Verification: Anyone reconstructs the ideal graph and independently ve
 
 ### Certification Graph
 
-Edges aren't assigned by the pollster. They're derived deterministically:
+Edges aren't assigned by the pollster, and they aren't chosen by the participants either. They're derived deterministically from a session seed and each node's canonical index:
 
 ```
-edge(i, j) exists  <=>  SHA-256(min(i,j) : max(i,j))  <=  p * MAX_HASH
+edge(i, j) exists  <=>  SHA-256(seed : min(i,j) : max(i,j))  <=  p * MAX_HASH
 ```
 
-Both endpoints compute the same hash, so they independently agree on the edge without coordination. During verification, a third party recomputes this ideal graph from scratch and compares it to the published data to detect fabricated or omitted edges.
+where `i` and `j` are integer indices in `[0, m)`, not node identifiers. Both endpoints compute the same hash, so they independently agree on the edge without coordination. During verification, a third party recomputes this ideal graph from scratch and compares it to the published data to detect fabricated or omitted edges.
+
+**Why the seed and the indices matter.** The security argument needs the graph to be a sample of G(m, p) drawn independently of the adversary's choices. Hashing the node ids directly does not give that. Since `node_id = SHA-256(public_key)[:16]`, a node's own row of the adjacency matrix would be a pure function of a key it picked itself, while every other row stayed fixed - so a corrupt node could generate keypairs offline and keep whichever one gave it the fewest edges into the honest set, doing a fraction of the PPE work with no trace a verifier could find. At 50 nodes and p = 0.26 (expected degree ~13), grinding down to degree 3 costs about 3,400 keygens: roughly a tenth of a second.
+
+Two things close that off:
+
+- **The seed folds in a digest of every registered public key.** Changing one key rerolls the whole graph instead of one row, so grinding trials are independent samples rather than cumulative progress - and a key that lowers one sybil's degree rerolls the others at the same time, making the cost of placing k sybils exponential in k rather than linear.
+- **The seed also folds in a nonce the pollster commits to at Protocol 1**, before any public key exists. That stops the mirror attack, where the pollster picks a favourable seed after seeing who registered.
+
+Indices are ranks in lexicographic order of public key, assigned once registration closes. Because they're canonical rather than registration-ordered, a pollster can't reshape the graph by delaying or reordering registrations either.
+
+The bulletin publishes the commitment and the nonce it opens to. A verifier rederives the seed and the indices itself and rejects the bulletin if what the pollster published disagrees - taking the pollster's `graph_seed` on trust would hand back exactly the freedom the commitment removes.
 
 ### Key Thresholds
 
@@ -138,8 +150,9 @@ Use `GET /api/poll/params/recommend?expected_responders=100&security_level=mediu
 ```
 backend/
   app/
-    crypto/          # graph.py (edge determination), verification.py (Protocol 6),
-                     # signatures.py (ECDSA), keys.py (key generation)
+    crypto/          # graph.py (seed derivation, index assignment, edge rule),
+                     # verification.py (Protocol 6), signatures.py (ECDSA),
+                     # keys.py (key generation)
     ppe/             # base.py (abstract interface), captcha.py (math CAPTCHA),
                      # coordinator.py (state machine), __init__.py (registry)
     api/routes/      # One file per protocol phase (poll, registration, certification,

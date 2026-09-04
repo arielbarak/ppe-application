@@ -5,10 +5,15 @@ from typing import Any, Dict, List, Optional
 
 from fastapi.testclient import TestClient
 
-from app.crypto.graph import compute_node_id, determine_neighbors
+from app.crypto.graph import (
+    GraphContext,
+    build_graph_context,
+    compute_node_id,
+    determine_neighbors,
+)
 from app.storage.memory import InMemoryStorage
 
-from .keypair_factory import sign_b64
+from .keypair_factory import STABLE_KEYPAIRS, sign_b64
 
 
 def _keypair_index(keypairs: List) -> Dict[str, tuple]:
@@ -42,11 +47,48 @@ def signed_vote_payload(
     }
 
 
-# Five reproducible node IDs derived from fixed pubkey strings. Use these wherever
-# graph behavior at a given p must be deterministic across runs.
-STABLE_NODE_IDS: List[str] = [
-    compute_node_id(f"test_pubkey_{i}") for i in range(5)
-]
+# Reproducible identities. Use these wherever graph behavior at a given p must be
+# deterministic across runs. They are real ECDSA keypairs derived from fixed
+# scalars, so a fixture can stamp genuine signatures *and* pin the node id --
+# which index assignment and the participant digest both depend on.
+STABLE_PUBKEYS: Dict[str, str] = {kp[3]: kp[2] for kp in STABLE_KEYPAIRS}
+
+STABLE_NODE_IDS: List[str] = [kp[3] for kp in STABLE_KEYPAIRS[:5]]
+
+# A fixed nonce keeps the derived seed -- and therefore the graph -- reproducible
+# across runs. Production sessions draw a fresh random one per poll.
+STABLE_SEED_NONCE: str = "a" * 64
+
+
+def pubkeys_for(node_ids: List[str], keypairs: Optional[List] = None) -> Dict[str, str]:
+    """Map node_id -> public key, from real keypairs where given, else the stable set."""
+    index = _keypair_index(keypairs) if keypairs else {}
+    resolved: Dict[str, str] = {}
+    for node_id in node_ids:
+        if node_id in index:
+            resolved[node_id] = index[node_id][1]
+        elif node_id in STABLE_PUBKEYS:
+            resolved[node_id] = STABLE_PUBKEYS[node_id]
+        else:
+            raise KeyError(
+                f"No public key known for node {node_id}. Pass keypairs=, or build "
+                f"the node id from STABLE_PUBKEYS."
+            )
+    return resolved
+
+
+def graph_context_for(
+    node_ids: List[str],
+    edge_probability: float,
+    keypairs: Optional[List] = None,
+    seed_nonce: str = STABLE_SEED_NONCE,
+) -> GraphContext:
+    """The GraphContext a verifier would derive for this set of nodes."""
+    return build_graph_context(
+        seed_nonce=seed_nonce,
+        public_keys=pubkeys_for(node_ids, keypairs),
+        probability=edge_probability,
+    )
 
 
 def build_small_poll_payload(
@@ -150,10 +192,19 @@ def complete_certification_for_all(
     Without keypairs the legacy placeholder ``signature`` string is used (only
     safe when the published results carry no public keys).
     """
+    ctx = storage.get_graph_context(session_id)
+    assert ctx is not None, (
+        "Graph is not frozen yet -- advance the session to 'certification' before "
+        "seeding edges"
+    )
+    assert ctx.probability == edge_probability, (
+        f"Session graph uses p={ctx.probability}, test passed p={edge_probability}"
+    )
+
     index = _keypair_index(keypairs) if keypairs else {}
     added = 0
     for node_id in node_ids:
-        neighbors = determine_neighbors(node_id, node_ids, edge_probability)
+        neighbors = determine_neighbors(node_id, ctx)
         for neighbor in neighbors:
             edge_sig = signature
             if verified and index:

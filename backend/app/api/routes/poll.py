@@ -18,7 +18,7 @@ from app.crypto import (
     validate_params,
     determine_neighbors,
 )
-from .helpers import get_session_or_404
+from .helpers import get_session_or_404, get_graph_context_or_400
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -50,6 +50,8 @@ async def create_poll(request: CreatePollRequest):
             ppe_type=request.ppe_type
         )
 
+        session = storage.get_session(session_id)
+
         logger.info(f"Created poll session {session_id} with {len(request.questions)} questions, ppe_type={request.ppe_type}")
 
         return CreatePollResponse(
@@ -60,7 +62,10 @@ async def create_poll(request: CreatePollRequest):
                 "edge_probability": request.edge_probability,
                 "effort_threshold": request.effort_threshold,
                 "validity_threshold": request.validity_threshold,
-                "ppe_type": request.ppe_type
+                "ppe_type": request.ppe_type,
+                # Binds the graph seed before any public key exists. The nonce
+                # it opens to is revealed when registration closes.
+                "seed_commitment": session.seed_commitment,
             }
         )
 
@@ -199,7 +204,10 @@ async def get_poll(session_id: str):
             "edge_probability": session.edge_probability,
             "effort_threshold": session.effort_threshold,
             "validity_threshold": session.validity_threshold,
-            "ppe_type": session.ppe_type
+            "ppe_type": session.ppe_type,
+            "seed_commitment": session.seed_commitment,
+            # Revealed only once the participant set is frozen.
+            "graph_seed": session.graph_seed,
         },
         registered_nodes_count=len(session.registered_nodes),
         created_at=session.created_at.isoformat()
@@ -232,12 +240,17 @@ def check_certification_threshold(session_id: str) -> dict:
     certified_nodes = []
     uncertified_nodes = []
 
+    ctx = storage.get_graph_context(session_id)
+    if ctx is None:
+        return {
+            "threshold_met": False,
+            "certified_nodes": [],
+            "total_nodes": total_nodes,
+            "message": "Certification graph not frozen yet (registration still open)"
+        }
+
     for node_id in all_node_ids:
-        neighbors = determine_neighbors(
-            node_id=node_id,
-            all_node_ids=all_node_ids,
-            probability=session.edge_probability
-        )
+        neighbors = determine_neighbors(node_id, ctx)
         edges = storage.get_node_edges(session_id, node_id)
         verified_edges = [e for e in edges if e.verified]
 
@@ -325,11 +338,8 @@ async def check_node_certification(session_id: str, node_id: str):
     if node_id not in all_node_ids:
         raise HTTPException(status_code=404, detail=f"Node {node_id} not found in session")
 
-    neighbors = determine_neighbors(
-        node_id=node_id,
-        all_node_ids=all_node_ids,
-        probability=session.edge_probability
-    )
+    ctx = get_graph_context_or_400(session_id)
+    neighbors = determine_neighbors(node_id, ctx)
     edges = storage.get_node_edges(session_id, node_id)
     verified_edges = [e for e in edges if e.verified]
 

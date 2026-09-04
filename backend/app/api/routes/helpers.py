@@ -21,6 +21,22 @@ def require_status(session, required_status: str, action: str = "perform this ac
         )
 
 
+def get_graph_context_or_400(session_id: str):
+    """The session's frozen certification graph, or 400 if registration is still open.
+
+    The graph only exists once the participant set is frozen (see
+    InMemoryStorage._freeze_graph), because the seed is derived from every
+    registered key.
+    """
+    ctx = storage.get_graph_context(session_id)
+    if ctx is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Certification graph is not available until registration closes",
+        )
+    return ctx
+
+
 def get_published_results_or_404(session_id: str):
     """Get published results or raise 404 if not found."""
     published_results = storage.get_published_results(session_id)

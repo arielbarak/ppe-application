@@ -81,8 +81,9 @@ def test_full_flow_at_scale_with_50_users(client, app_storage):
         app_storage, sid, node_ids, edge_probability=params.edge_probability,
         keypairs=keypairs,
     )
+    ctx = app_storage.get_graph_context(sid)
     expected_directed_edges = sum(
-        len(determine_neighbors(nid, node_ids, params.edge_probability)) for nid in node_ids
+        len(determine_neighbors(nid, ctx)) for nid in node_ids
     )
     assert edges_seeded == expected_directed_edges
 

@@ -3,8 +3,16 @@
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
+import secrets
 import threading
 import logging
+
+from app.crypto.graph import (
+    GraphContext,
+    build_graph_context,
+    compute_participant_digest,
+    compute_seed_commitment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +64,30 @@ class PollSession:
     status: str = "registration"            # registration -> certification -> voting -> results -> closed
     created_at: datetime = field(default_factory=datetime.now)
 
+    # Graph binding (see crypto/graph.py). The nonce is generated at poll
+    # creation and its commitment published immediately; the nonce itself is
+    # revealed once registration closes, at which point the seed, the
+    # participant digest and the index assignment are frozen together.
+    seed_nonce: str = field(default_factory=lambda: secrets.token_hex(32))
+    graph_seed: Optional[str] = None
+    participant_digest: Optional[str] = None
+    node_indices: Dict[str, int] = field(default_factory=dict)
+
     registered_nodes: List[RegisteredNode] = field(default_factory=list)
     captcha_challenges: Dict[str, CaptchaChallenge] = field(default_factory=dict)
     certification_graph: Dict[str, List[CertificationEdge]] = field(default_factory=dict)
     votes: Dict[str, VoteRecord] = field(default_factory=dict)
     published_results: Optional[Dict[str, Any]] = None
     published_at: Optional[datetime] = None
+
+    @property
+    def seed_commitment(self) -> str:
+        """Published at Protocol 1, before any public key is registered."""
+        return compute_seed_commitment(self.seed_nonce)
+
+    @property
+    def graph_frozen(self) -> bool:
+        return self.graph_seed is not None
 
 
 class InMemoryStorage:
@@ -111,9 +137,50 @@ class InMemoryStorage:
             session = self._sessions.get(session_id)
             if not session:
                 return False
+
+            # Leaving registration freezes the participant set, which is the
+            # moment the certification graph becomes computable. Do it here so
+            # every path into certification gets the same frozen graph.
+            if new_status == "certification" and not session.graph_frozen:
+                self._freeze_graph(session)
+
             session.status = new_status
             logger.info(f"Session {session_id} status updated to {new_status}")
             return True
+
+    def _freeze_graph(self, session: PollSession) -> GraphContext:
+        """Derive and store the session's graph binding. Caller holds the lock."""
+        public_keys = {n.node_id: n.pseudonym for n in session.registered_nodes}
+        ctx = build_graph_context(
+            seed_nonce=session.seed_nonce,
+            public_keys=public_keys,
+            probability=session.edge_probability,
+        )
+        session.graph_seed = ctx.seed
+        session.node_indices = dict(ctx.indices)
+        session.participant_digest = compute_participant_digest(public_keys.values())
+        logger.info(
+            f"Session {session.session_id} graph frozen: {len(public_keys)} nodes, "
+            f"seed={ctx.seed[:16]}..."
+        )
+        return ctx
+
+    def get_graph_context(self, session_id: str) -> Optional[GraphContext]:
+        """The frozen graph context, or None if registration has not closed yet.
+
+        Rebuilt from the stored seed and indices rather than recomputed, so the
+        graph a node certifies against can never drift from the one frozen when
+        registration closed.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session or not session.graph_frozen:
+                return None
+            return GraphContext(
+                seed=session.graph_seed,
+                probability=session.edge_probability,
+                indices=dict(session.node_indices),
+            )
 
     def list_sessions(self) -> List[str]:
         with self._lock:
@@ -333,6 +400,18 @@ class InMemoryStorage:
                     'ppe_type': session.ppe_type
                 },
                 'public_keys': public_keys,
+                # Everything a verifier needs to recompute the graph without
+                # trusting us: the commitment made at Protocol 1 and the nonce
+                # it opens to. participant_digest / graph_seed / node_indices
+                # are published for transparency, but a verifier must derive
+                # its own from public_keys rather than take these on faith.
+                'graph_binding': {
+                    'seed_commitment': session.seed_commitment,
+                    'seed_nonce': session.seed_nonce,
+                    'participant_digest': session.participant_digest,
+                    'graph_seed': session.graph_seed,
+                    'node_indices': dict(session.node_indices),
+                },
                 'responses': [
                     {
                         'node_id': vote.node_id,

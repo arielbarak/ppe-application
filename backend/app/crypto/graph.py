@@ -1,20 +1,54 @@
 """
 Certification graph primitives (Protocols 3 & 6).
 
-The key idea: edges in the certification graph are NOT chosen by the pollster.
-They're derived deterministically from a hash over both node IDs, so any
-party can independently recompute the full "ideal graph" from just the
-participant list and edge probability p.
+Edges in the certification graph are NOT chosen by the pollster, and they are
+NOT chosen by the participants either. They are derived deterministically from
+a session-wide seed and each node's *canonical index*, so any party can
+independently recompute the full "ideal graph" once registration has closed:
 
-  edge(i, j) exists  ⟺  SHA-256(min(i,j) : max(i,j))  ≤  p × MAX_HASH
+  edge(i, j) exists  <=>  SHA-256(seed : min(i,j) : max(i,j))  <=  p * MAX_HASH
 
-This module also handles η_E exclusion: if a node fails more than η_E of
+where i and j are integer indices in [0, m), not node identifiers.
+
+Why indices and a seed, rather than hashing the node ids
+--------------------------------------------------------
+The security argument of the PPE paper needs the certification graph to be a
+sample of G(m, p) drawn independently of the adversary's choices. An earlier
+version of this module hashed the node ids directly:
+
+    SHA-256(min(id_i, id_j) : max(id_i, id_j)) <= p * MAX_HASH
+
+Since node_id = SHA-256(public_key)[:16], that made a node's own row of the
+adjacency matrix a pure function of a key it chose itself, while everybody
+else's rows stayed fixed. A corrupt node could therefore shop for its own
+neighbourhood: generate keypairs offline and keep the one whose row had the
+fewest edges into the honest set, cutting its PPE workload without doing any
+work and without leaving a trace a verifier could detect (the reconstructed
+ideal graph was derived from the same ids, so it agreed with the fraud).
+
+Two changes remove that freedom:
+
+  * seed folds in a digest of *every* registered public key, so changing one
+    key rerolls the entire graph rather than one row. Each grinding trial is a
+    fresh independent sample of the whole matrix, so an adversary cannot
+    accumulate progress -- and cannot lower the degree of several sybils at
+    once, since a key that helps one rerolls the others.
+  * seed also folds in a nonce the pollster commits to at poll creation,
+    before any key is known, which stops the pollster from grinding the seed
+    after seeing the participants.
+
+Indices are assigned canonically from the frozen participant set -- rank in
+lexicographic order of public key -- so neither the pollster's registration
+ordering nor a node's own choice can steer them.
+
+This module also handles eta_E exclusion: if a node fails more than eta_E of
 its PPE challenges, it's excluded from the final tally.
 """
 
 import hashlib
 import logging
-from typing import List, Set, Dict, Any
+from dataclasses import dataclass
+from typing import List, Set, Dict, Any, Mapping, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -27,34 +61,165 @@ def compute_node_id(public_key: str) -> str:
     return hashlib.sha256(public_key.encode('utf-8')).hexdigest()[:16]
 
 
-def determine_neighbors(
-    node_id: str,
-    all_node_ids: List[str],
+# ---------------------------------------------------------------------------
+# Seed derivation (Protocol 1 commitment -> Protocol 3 reveal)
+# ---------------------------------------------------------------------------
+
+def compute_seed_commitment(seed_nonce: str) -> str:
+    """The pollster publishes this at poll creation, before any key is known.
+
+    Committing first is what stops the pollster from picking a nonce that
+    produces a graph it likes after seeing the registered keys.
+    """
+    return hashlib.sha256(seed_nonce.encode('utf-8')).hexdigest()
+
+
+def verify_seed_commitment(seed_nonce: str, seed_commitment: str) -> bool:
+    """Check a revealed nonce against the commitment published at Protocol 1."""
+    if not seed_nonce or not seed_commitment:
+        return False
+    return compute_seed_commitment(seed_nonce) == seed_commitment
+
+
+def compute_participant_digest(public_keys: Iterable[str]) -> str:
+    """Digest of the frozen participant set, order-independent.
+
+    Sorting first means the pollster cannot change the digest by reordering
+    registrations, and including every key means no single participant can
+    steer it.
+    """
+    canonical = '\n'.join(sorted(public_keys))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def compute_graph_seed(seed_nonce: str, participant_digest: str) -> str:
+    """Fix the session's graph once registration closes.
+
+    Neither side controls this alone: the nonce is committed before the keys
+    exist, and the digest covers all the keys.
+    """
+    return hashlib.sha256(
+        f"{seed_nonce}:{participant_digest}".encode('utf-8')
+    ).hexdigest()
+
+
+def assign_indices(public_keys: Mapping[str, str]) -> Dict[str, int]:
+    """Assign each node its canonical index in [0, m).
+
+    Rank in lexicographic order of public key. Deterministic, recomputable by
+    any verifier from the published key set, and independent of the order in
+    which nodes happened to register -- so a pollster cannot permute the graph
+    by delaying or reordering registrations.
+
+    public_keys maps node_id -> public key. Raises if any entry breaks the
+    node_id == SHA-256(public_key)[:16] binding, since an unbound key would let
+    the pollster shift every index by publishing a key it made up.
+    """
+    for node_id, pubkey in public_keys.items():
+        if compute_node_id(pubkey) != node_id:
+            raise ValueError(
+                f"Public key for node {node_id} does not hash to its node id"
+            )
+
+    ordered = sorted(public_keys.items(), key=lambda item: item[1])
+    return {node_id: index for index, (node_id, _) in enumerate(ordered)}
+
+
+@dataclass(frozen=True)
+class GraphContext:
+    """Everything needed to compute the ideal graph, frozen at registration close.
+
+    Build it with build_graph_context rather than by hand, so the seed and the
+    indices always come from the same participant set.
+    """
+    seed: str
     probability: float
-) -> List[str]:
-    """
-    Deterministic neighbor computation. Both endpoints of a potential edge
-    derive the same hash (thanks to min/max ordering), so they independently
-    agree on whether the edge exists without any coordination.
-    """
+    indices: Mapping[str, int]
+
+    @property
+    def node_ids(self) -> List[str]:
+        """Registered node ids, in canonical index order."""
+        return sorted(self.indices, key=lambda nid: self.indices[nid])
+
+    @property
+    def size(self) -> int:
+        return len(self.indices)
+
+
+def build_graph_context(
+    seed_nonce: str,
+    public_keys: Mapping[str, str],
+    probability: float,
+) -> GraphContext:
+    """Derive the session's graph context from the frozen participant set."""
     if not 0.0 <= probability <= 1.0:
         raise ValueError(f"Probability must be between 0 and 1, got {probability}")
+    if not seed_nonce:
+        raise ValueError("seed_nonce is required to derive the graph seed")
 
-    neighbors = []
-    threshold = int(_MAX_HASH * probability)
+    participant_digest = compute_participant_digest(public_keys.values())
+    seed = compute_graph_seed(seed_nonce, participant_digest)
 
-    for other_id in all_node_ids:
-        if other_id == node_id:
-            continue
+    return GraphContext(
+        seed=seed,
+        probability=probability,
+        indices=assign_indices(public_keys),
+    )
 
-        edge_key = f"{min(node_id, other_id)}:{max(node_id, other_id)}"
-        h = int(hashlib.sha256(edge_key.encode('utf-8')).hexdigest(), 16)
 
-        if h <= threshold:
-            neighbors.append(other_id)
+# ---------------------------------------------------------------------------
+# The edge rule
+# ---------------------------------------------------------------------------
 
-    logger.info(f"Node {node_id} has {len(neighbors)} neighbors (p={probability})")
+def _edge_hash(seed: str, index_a: int, index_b: int) -> int:
+    """SHA-256 over the seed and the ordered index pair, as an integer."""
+    lo, hi = (index_a, index_b) if index_a < index_b else (index_b, index_a)
+    return int(
+        hashlib.sha256(f"{seed}:{lo}:{hi}".encode('utf-8')).hexdigest(), 16
+    )
+
+
+def edge_exists(node_a: str, node_b: str, ctx: GraphContext) -> bool:
+    """Does the ideal graph contain the edge between these two nodes?
+
+    Symmetric by construction: both endpoints order the index pair the same
+    way, so they independently agree on the edge without coordinating.
+    """
+    if node_a == node_b:
+        return False
+
+    index_a = ctx.indices.get(node_a)
+    index_b = ctx.indices.get(node_b)
+    if index_a is None or index_b is None:
+        return False
+
+    threshold = int(_MAX_HASH * ctx.probability)
+    return _edge_hash(ctx.seed, index_a, index_b) <= threshold
+
+
+def determine_neighbors(node_id: str, ctx: GraphContext) -> List[str]:
+    """The ideal-graph neighbours of node_id, in canonical index order."""
+    if node_id not in ctx.indices:
+        raise ValueError(f"Node {node_id} is not part of this graph context")
+
+    neighbors = [
+        other_id for other_id in ctx.node_ids
+        if other_id != node_id and edge_exists(node_id, other_id, ctx)
+    ]
+
+    logger.info(
+        f"Node {node_id} (index {ctx.indices[node_id]}) has "
+        f"{len(neighbors)} neighbors (p={ctx.probability})"
+    )
     return neighbors
+
+
+def build_ideal_graph(ctx: GraphContext) -> Dict[str, Set[str]]:
+    """The full ideal graph G_c as an adjacency map. Symmetric by construction."""
+    return {
+        node_id: set(determine_neighbors(node_id, ctx))
+        for node_id in ctx.node_ids
+    }
 
 
 def compute_exclusions(
@@ -62,7 +227,7 @@ def compute_exclusions(
     eta_e: float
 ) -> Set[str]:
     """
-    η_E exclusion pass. Any node whose failure rate exceeds eta_e gets
+    eta_E exclusion pass. Any node whose failure rate exceeds eta_e gets
     kicked out of the final tally. Accepts both list-of-edge-objects
     (runtime format) and dict-of-dicts.
     """
@@ -104,7 +269,7 @@ def compute_exclusions(
         else:
             logger.debug(
                 f"Node {node_id} valid: {failed_edges}/{total_edges} failed "
-                f"({failure_rate:.2%} ≤ {eta_e:.2%})"
+                f"({failure_rate:.2%} <= {eta_e:.2%})"
             )
 
     logger.info(f"Total excluded nodes: {len(excluded_nodes)}")

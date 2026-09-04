@@ -5,6 +5,7 @@ import string
 import pytest
 
 from app.crypto.graph import (
+    build_graph_context,
     compute_exclusions,
     compute_node_id,
     determine_neighbors,
@@ -12,7 +13,7 @@ from app.crypto.graph import (
 )
 from app.storage.memory import CertificationEdge
 
-from tests.fixtures import STABLE_NODE_IDS
+from tests.fixtures import STABLE_NODE_IDS, STABLE_SEED_NONCE, graph_context_for, pubkeys_for
 
 
 # compute_node_id
@@ -33,12 +34,14 @@ def test_compute_node_id_length_16_lowercase_hex():
 
 
 def test_determine_neighbors_p_zero_returns_empty():
-    assert determine_neighbors(STABLE_NODE_IDS[0], STABLE_NODE_IDS, 0.0) == []
+    ctx = graph_context_for(STABLE_NODE_IDS, 0.0)
+    assert determine_neighbors(STABLE_NODE_IDS[0], ctx) == []
 
 
 def test_determine_neighbors_p_one_returns_all_others():
     me = STABLE_NODE_IDS[0]
-    neighbors = determine_neighbors(me, STABLE_NODE_IDS, 1.0)
+    ctx = graph_context_for(STABLE_NODE_IDS, 1.0)
+    neighbors = determine_neighbors(me, ctx)
 
     expected = [n for n in STABLE_NODE_IDS if n != me]
     assert sorted(neighbors) == sorted(expected)
@@ -47,15 +50,17 @@ def test_determine_neighbors_p_one_returns_all_others():
 
 def test_determine_neighbors_excludes_self_at_any_p():
     for p in (0.0, 0.25, 0.5, 0.75, 1.0):
+        ctx = graph_context_for(STABLE_NODE_IDS, p)
         for me in STABLE_NODE_IDS:
-            assert me not in determine_neighbors(me, STABLE_NODE_IDS, p)
+            assert me not in determine_neighbors(me, ctx)
 
 
 @pytest.mark.parametrize("p", [0.1, 0.3, 0.5, 0.7, 0.9])
 def test_determine_neighbors_symmetry(p):
-    """edge(A,B) <=> edge(B,A): same hash regardless of direction."""
+    """edge(A,B) <=> edge(B,A): the index pair is ordered before hashing."""
+    ctx = graph_context_for(STABLE_NODE_IDS, p)
     membership = {
-        nid: set(determine_neighbors(nid, STABLE_NODE_IDS, p))
+        nid: set(determine_neighbors(nid, ctx))
         for nid in STABLE_NODE_IDS
     }
     for a in STABLE_NODE_IDS:
@@ -69,23 +74,35 @@ def test_determine_neighbors_symmetry(p):
 
 def test_determine_neighbors_deterministic_repeated_calls():
     me = STABLE_NODE_IDS[0]
-    first = determine_neighbors(me, STABLE_NODE_IDS, 0.5)
-    second = determine_neighbors(me, STABLE_NODE_IDS, 0.5)
-    assert first == second
+    ctx = graph_context_for(STABLE_NODE_IDS, 0.5)
+    assert determine_neighbors(me, ctx) == determine_neighbors(me, ctx)
 
 
-def test_determine_neighbors_input_order_independent():
-    """Shuffling the all_node_ids list must not change neighbor membership."""
+def test_determine_neighbors_registration_order_independent():
+    """Indices come from sorted public keys, so registration order cannot reshape
+    the graph -- a pollster must not be able to permute it by reordering."""
     me = STABLE_NODE_IDS[0]
-    forward = set(determine_neighbors(me, STABLE_NODE_IDS, 0.5))
-    reversed_set = set(determine_neighbors(me, list(reversed(STABLE_NODE_IDS)), 0.5))
-    assert forward == reversed_set
+    forward = set(determine_neighbors(me, graph_context_for(STABLE_NODE_IDS, 0.5)))
+    backward = set(
+        determine_neighbors(me, graph_context_for(list(reversed(STABLE_NODE_IDS)), 0.5))
+    )
+    assert forward == backward
 
 
 @pytest.mark.parametrize("bad_p", [-0.1, 1.5, -1.0, 2.0])
-def test_determine_neighbors_invalid_probability_raises(bad_p):
+def test_build_graph_context_invalid_probability_raises(bad_p):
     with pytest.raises(ValueError):
-        determine_neighbors(STABLE_NODE_IDS[0], STABLE_NODE_IDS, bad_p)
+        build_graph_context(
+            seed_nonce=STABLE_SEED_NONCE,
+            public_keys=pubkeys_for(STABLE_NODE_IDS),
+            probability=bad_p,
+        )
+
+
+def test_determine_neighbors_unknown_node_raises():
+    ctx = graph_context_for(STABLE_NODE_IDS, 0.5)
+    with pytest.raises(ValueError):
+        determine_neighbors("not-a-registered-node", ctx)
 
 
 # compute_exclusions

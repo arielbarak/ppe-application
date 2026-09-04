@@ -1,7 +1,8 @@
 """ECDSA keypair helpers shared by tests."""
 
 import base64
-from typing import Tuple
+import hashlib
+from typing import List, Tuple
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -18,6 +19,29 @@ def make_keypair() -> Keypair:
     priv, pub = generate_server_keypair()
     pub_b64 = export_public_key(pub)
     return priv, pub, pub_b64, compute_node_id(pub_b64)
+
+
+# Order of the SECP256R1 group; private scalars must land in [1, n-1].
+_P256_ORDER = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+
+
+def deterministic_keypair(index: int) -> Keypair:
+    """A *real* ECDSA P-256 keypair derived from a fixed scalar.
+
+    Real keys, so every signature a fixture stamps actually verifies; fixed, so
+    node ids -- and therefore the graph shape at a given seed -- are reproducible
+    across runs. Test-only: never derive a production key this way.
+    """
+    digest = hashlib.sha256(f"ppe-test-key-{index}".encode("utf-8")).digest()
+    scalar = int.from_bytes(digest, "big") % (_P256_ORDER - 1) + 1
+    priv = ec.derive_private_key(scalar, ec.SECP256R1())
+    pub = priv.public_key()
+    pub_b64 = export_public_key(pub)
+    return priv, pub, pub_b64, compute_node_id(pub_b64)
+
+
+# Eight reproducible identities shared by the fixture layer.
+STABLE_KEYPAIRS: List[Keypair] = [deterministic_keypair(i) for i in range(8)]
 
 
 def sign_b64(priv: ec.EllipticCurvePrivateKey, message: str) -> str:

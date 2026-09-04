@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Header, Query
 from app.models import NeighborsResponse
 from app.storage import storage
 from app.crypto import determine_neighbors
-from .helpers import get_session_or_404
+from .helpers import get_session_or_404, get_graph_context_or_400
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -59,7 +59,11 @@ async def get_neighbors(
     node_id: Optional[str] = Header(None, alias="X-Node-ID"),
     detailed: bool = Query(False, description="Include public keys and status for each neighbor")
 ):
-    """Return certification neighbors for node_id using deterministic graph: H(min(i,j):max(i,j)) <= p."""
+    """Return certification neighbors for node_id from the session's frozen graph.
+
+    Edges come from H(seed : min(i,j) : max(i,j)) <= p over canonical indices,
+    so the answer is fixed the moment registration closes.
+    """
     if not node_id:
         raise HTTPException(
             status_code=400,
@@ -83,11 +87,8 @@ async def get_neighbors(
             detail=f"Node {node_id} not registered in this poll"
         )
 
-    neighbor_ids = determine_neighbors(
-        node_id=node_id,
-        all_node_ids=all_node_ids,
-        probability=session.edge_probability
-    )
+    ctx = get_graph_context_or_400(session_id)
+    neighbor_ids = determine_neighbors(node_id, ctx)
 
     logger.info(f"Node {node_id} has {len(neighbor_ids)} neighbors (p={session.edge_probability})")
 
@@ -151,11 +152,8 @@ async def get_neighbors_detailed(
             detail=f"Node {node_id} not registered in this poll"
         )
 
-    neighbor_ids = determine_neighbors(
-        node_id=node_id,
-        all_node_ids=all_node_ids,
-        probability=session.edge_probability
-    )
+    ctx = get_graph_context_or_400(session_id)
+    neighbor_ids = determine_neighbors(node_id, ctx)
 
     logger.info(f"Node {node_id} has {len(neighbor_ids)} neighbors (p={session.edge_probability})")
 
@@ -196,11 +194,8 @@ async def get_certification_status(
 
     registered_nodes = storage.get_registered_nodes(session_id)
     all_node_ids = [n.node_id for n in registered_nodes]
-    neighbors = determine_neighbors(
-        node_id=node_id,
-        all_node_ids=all_node_ids,
-        probability=session.edge_probability
-    )
+    ctx = get_graph_context_or_400(session_id)
+    neighbors = determine_neighbors(node_id, ctx)
 
     completed_edges = len([e for e in edges if e.verified or (not e.verified)])
     verified_edges = len([e for e in edges if e.verified])

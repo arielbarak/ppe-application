@@ -4,9 +4,14 @@ import json
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
-from app.crypto.graph import determine_neighbors
+from app.crypto.graph import (
+    compute_participant_digest,
+    compute_seed_commitment,
+    determine_neighbors,
+)
 
-from .keypair_factory import sign_b64
+from .keypair_factory import STABLE_KEYPAIRS, sign_b64
+from .poll_factory import STABLE_SEED_NONCE, graph_context_for, pubkeys_for
 
 
 def _canonical_vote_message(vote: Dict[str, Any]) -> str:
@@ -34,6 +39,8 @@ def build_published_results(
     drop_edges: Optional[Iterable[tuple]] = None,
     mark_unverified_edges: Optional[Iterable[tuple]] = None,
     keypairs: Optional[List] = None,
+    seed_nonce: str = STABLE_SEED_NONCE,
+    graph_binding_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Assemble a published_results dict matching the shape produced by
@@ -60,16 +67,21 @@ def build_published_results(
     unverified_set = set(mark_unverified_edges or [])
     timestamp = datetime(2024, 1, 1, 12, 0, 0).isoformat()
 
-    # When keypairs are supplied, publish the node->pubkey map and stamp every
-    # verified edge / ballot with a *genuine* signature so the signature-checking
-    # verification path can be exercised. Otherwise fall back to placeholders
-    # (verification then has no public keys and skips the signature checks).
-    index = {kp[3]: (kp[0], kp[2]) for kp in keypairs} if keypairs else {}
-    public_keys = {nid: index[nid][1] for nid in node_ids if nid in index} if index else None
+    # Every verified edge / ballot is stamped with a *genuine* signature, so a
+    # clean bulletin really does survive the signature-checking path. Explicit
+    # keypairs win; otherwise fall back to the stable identities, which cover any
+    # node id built from STABLE_NODE_IDS.
+    index = {kp[3]: (kp[0], kp[2]) for kp in (keypairs or STABLE_KEYPAIRS)}
+
+    # Public keys are no longer optional: without them a verifier cannot assign
+    # indices or derive the seed, so a keyless bulletin is unverifiable by design.
+    # Tests that used to omit them get the stable pseudonyms instead.
+    public_keys = pubkeys_for(list(node_ids), keypairs)
+    ctx = graph_context_for(list(node_ids), edge_probability, keypairs, seed_nonce)
 
     edges: List[Dict[str, Any]] = []
     for node_id in node_ids:
-        for neighbor in determine_neighbors(node_id, node_ids, edge_probability):
+        for neighbor in determine_neighbors(node_id, ctx):
             if (node_id, neighbor) in drop_set:
                 continue
             verified = (node_id, neighbor) not in unverified_set
@@ -114,9 +126,18 @@ def build_published_results(
     cert_graph: Dict[str, Any] = {
         "nodes": list(node_ids),
         "edges": edges,
+        "public_keys": public_keys,
     }
-    if public_keys is not None:
-        cert_graph["public_keys"] = public_keys
+
+    graph_binding: Dict[str, Any] = {
+        "seed_commitment": compute_seed_commitment(seed_nonce),
+        "seed_nonce": seed_nonce,
+        "participant_digest": compute_participant_digest(public_keys.values()),
+        "graph_seed": ctx.seed,
+        "node_indices": dict(ctx.indices),
+    }
+    if graph_binding_overrides:
+        graph_binding.update(graph_binding_overrides)
 
     results: Dict[str, Any] = {
         "session_id": session_id,
@@ -128,10 +149,10 @@ def build_published_results(
             "validity_threshold": validity_threshold,
             "ppe_type": ppe_type,
         },
+        "public_keys": public_keys,
+        "graph_binding": graph_binding,
         "responses": responses,
         "certification_graph": cert_graph,
         "published_at": timestamp,
     }
-    if public_keys is not None:
-        results["public_keys"] = public_keys
     return results
